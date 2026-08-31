@@ -145,3 +145,43 @@ public enum HEOSCommand: Equatable, Sendable {
         String(commandPath.drop(while: { $0 != "/" }).dropFirst())
     }
 }
+
+extension HEOSCommand {
+    /// The player ID the command targets, when it has exactly one.
+    var pid: Int? {
+        switch self {
+        case .getPlayerInfo(let pid), .getPlayState(let pid), .getNowPlayingMedia(let pid),
+             .getVolume(let pid), .getMute(let pid), .toggleMute(let pid), .getPlayMode(let pid),
+             .clearQueue(let pid), .playNext(let pid), .playPrevious(let pid), .checkUpdate(let pid):
+            return pid
+        case .setPlayState(let pid, _), .setVolume(let pid, _), .volumeUp(let pid, _),
+             .volumeDown(let pid, _), .setMute(let pid, _), .getQueue(let pid, _),
+             .playQueueItem(let pid, _), .removeFromQueue(let pid, _), .saveQueue(let pid, _),
+             .setQuickSelect(let pid, _), .playQuickSelect(let pid, _), .getQuickSelects(let pid, _),
+             .playPresetStation(let pid, _), .playURL(let pid, _):
+            return pid
+        case .setPlayMode(let pid, _, _), .moveQueueItem(let pid, _, _), .playInputSource(let pid, _, _):
+            return pid
+        case .playStation(let pid, _, _, _, _), .addTrackToQueue(let pid, _, _, _, _):
+            return pid
+        case .addContainerToQueue(let pid, _, _, _):
+            return pid
+        default:
+            return nil
+        }
+    }
+
+    /// The group ID the command targets, when it has one.
+    var gid: Int? {
+        switch self {
+        case .getGroupInfo(let gid), .getGroupVolume(let gid), .getGroupMute(let gid),
+             .toggleGroupMute(let gid):
+            return gid
+        case .setGroupVolume(let gid, _), .groupVolumeUp(let gid, _), .groupVolumeDown(let gid, _),
+             .setGroupMute(let gid, _):
+            return gid
+        default:
+            return nil
+        }
+    }
+}

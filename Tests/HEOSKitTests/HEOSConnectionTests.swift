@@ -38,6 +38,184 @@ struct HEOSConnectionTests {
         await connection.disconnect()
     }
 
+    // MARK: - Parameter-Discriminated Matching
+
+    @Test func concurrentQueuePageAndFullQueueResolveByRange() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        // Page request first (older), full-queue refresh second; responses arrive in reverse order.
+        async let page = connection.send(.getQueue(pid: 1, range: 100...199), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+        async let full = connection.send(.getQueue(pid: 1), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(makeResponse(command: "player/get_queue", message: "pid=1"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "player/get_queue", message: "pid=1&range=100,199"))
+
+        let pageResponse = try await page
+        let fullResponse = try await full
+
+        #expect(pageResponse.message["range"] == "100,199")
+        #expect(fullResponse.message["range"] == nil)
+
+        await connection.disconnect()
+    }
+
+    @Test func concurrentBrowsePagesResolveByRange() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let page1 = connection.send(.browseSource(sid: 5, range: 0...49), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+        async let page2 = connection.send(.browseSource(sid: 5, range: 50...99), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        // Second page answers first
+        await transport.simulateEvent(makeResponse(command: "browse/browse", message: "sid=5&range=50,99&returned=50&count=120"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "browse/browse", message: "sid=5&range=0,49&returned=50&count=120"))
+
+        let r1 = try await page1
+        let r2 = try await page2
+
+        #expect(r1.message["range"] == "0,49")
+        #expect(r2.message["range"] == "50,99")
+
+        await connection.disconnect()
+    }
+
+    @Test func lateResponseOfAbandonedCommandDoesNotResolveSibling() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        // Replays a captured sequence: a cancelled TRACKS browse whose late response
+        // must not resolve the STATIONS browse sent right after it.
+        let tracks = Task { try await connection.send(.browseSourceContainer(sid: 1026, cid: "TRACKS", range: 0...9), timeout: .seconds(5)) }
+        try await Task.sleep(for: .milliseconds(30))
+        tracks.cancel()
+        try await Task.sleep(for: .milliseconds(30))
+
+        async let stations = connection.send(.browseSourceContainer(sid: 1026, cid: "STATIONS", range: 0...9), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(makeResponse(command: "browse/browse", message: "sid=1026&cid=TRACKS&range=0,9&returned=10&count=50"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "browse/browse", message: "sid=1026&cid=STATIONS&range=0,9&returned=4&count=4"))
+
+        let response = try await stations
+        #expect(response.message["cid"] == "STATIONS")
+
+        await connection.disconnect()
+    }
+
+    @Test func cancelledSearchResponseDoesNotResolveNewerSearch() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        let paris = Task { try await connection.send(.search(sid: 5, searchString: "paris", searchCriteriaID: 1), timeout: .seconds(5)) }
+        try await Task.sleep(for: .milliseconds(30))
+        paris.cancel()
+        try await Task.sleep(for: .milliseconds(30))
+
+        async let montpellier = connection.send(.search(sid: 5, searchString: "montpellier", searchCriteriaID: 1), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(makeResponse(command: "browse/search", message: "sid=5&search=paris&scid=1&returned=5&count=11"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "browse/search", message: "sid=5&search=montpellier&scid=1&returned=3&count=3"))
+
+        let response = try await montpellier
+        #expect(response.message["search"] == "montpellier")
+
+        await connection.disconnect()
+    }
+
+    @Test func concurrentSameCommandDifferentPlayersResolveByPID() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let first = connection.send(.getVolume(pid: 1), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+        async let second = connection.send(.getVolume(pid: 2), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        // Player 2 answers before player 1
+        await transport.simulateEvent(makeResponse(command: "player/get_volume", message: "pid=2&level=30"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "player/get_volume", message: "pid=1&level=10"))
+
+        let r1 = try await first
+        let r2 = try await second
+
+        #expect(r1.message["level"] == "10")
+        #expect(r2.message["level"] == "30")
+
+        await connection.disconnect()
+    }
+
+    @Test func concurrentGroupCommandsResolveByGID() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let first = connection.send(.getGroupVolume(gid: 1), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+        async let second = connection.send(.getGroupVolume(gid: 2), timeout: .seconds(5))
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(makeResponse(command: "group/get_volume", message: "gid=2&level=40"))
+        try await Task.sleep(for: .milliseconds(50))
+        await transport.simulateEvent(makeResponse(command: "group/get_volume", message: "gid=1&level=20"))
+
+        let r1 = try await first
+        let r2 = try await second
+
+        #expect(r1.message["level"] == "20")
+        #expect(r2.message["level"] == "40")
+
+        await connection.disconnect()
+    }
+
+    @Test func responseWithoutEchoedParametersFallsBackToOldestSamePath() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let queue = connection.send(.getQueue(pid: 1, range: 0...99), timeout: .seconds(2))
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(makeResponse(command: "player/get_queue", message: ""))
+
+        let response = try await queue
+        #expect(response.command == "player/get_queue")
+
+        await connection.disconnect()
+    }
+
+    @Test func setGroupResponseWithUnrequestedGIDResolves() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let group = connection.send(.setGroup(playerIDs: [1, 2]), timeout: .seconds(2))
+        try await Task.sleep(for: .milliseconds(30))
+
+        // The device answers with a gid the command never carried.
+        await transport.simulateEvent(makeResponse(command: "group/set_group", message: "gid=99&name=Kitchen"))
+
+        let response = try await group
+        #expect(response.message["gid"] == "99")
+
+        await connection.disconnect()
+    }
+
     // MARK: - Duplicate Command FIFO Resolution
 
     @Test func duplicateCommandKeysResolvedFIFO() async throws {

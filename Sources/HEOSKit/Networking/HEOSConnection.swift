@@ -189,11 +189,11 @@ public actor HEOSConnection {
             let parsed = try responseParser.parse(data)
             switch parsed {
             case .response(let response):
-                let commandKey = Self.responseMatchingKey(for: response)
+                let commandKey = Self.matchingKey(command: response.command, message: response.message)
                 if response.isUnderProcess {
                     HEOSLogger.connection.debug("Command under process for \(response.command), waiting for real response")
                     resetTimeout(for: commandKey)
-                } else if let id = oldestPendingID(for: commandKey),
+                } else if let id = matchPendingID(for: commandKey),
                           let pending = pendingCommands.removeValue(forKey: id) {
                     HEOSLogger.connection.debug("Matched response #\(id): \(response.command)")
                     pending.timeoutTask.cancel()
@@ -211,10 +211,8 @@ public actor HEOSConnection {
             }
         } catch {
             if let heosError = error as? HEOSError {
-                let commandKey = Self.errorMatchingKey(for: heosError)
-                let matchID = oldestPendingID(for: commandKey)
-                    ?? oldestPendingIDByPrefix(for: heosError.command)
-                if let id = matchID,
+                let commandKey = Self.matchingKey(command: heosError.command, message: heosError.message)
+                if let id = matchPendingID(for: commandKey),
                    let pending = pendingCommands.removeValue(forKey: id) {
                     pending.timeoutTask.cancel()
                     pending.continuation.resume(throwing: heosError)
@@ -254,19 +252,37 @@ public actor HEOSConnection {
             .id
     }
 
-    /// Fallback: find the oldest pending command whose key starts with the given
-    /// command prefix. Used when error responses omit parameters (e.g. HEOS returns
-    /// "browse/browse" error without sid, but we have "browse/browse|sid=13" pending).
-    private func oldestPendingIDByPrefix(for command: String) -> UInt64? {
-        pendingCommands.values
-            .filter { $0.commandKey.hasPrefix(command) }
+    /// Exact key first, then the oldest compatible pending command: a parameter missing on either
+    /// side is tolerated (echoes vary per firmware and command), a differing value disqualifies --
+    /// so an imperfect echo degrades to FIFO while a contradicting one is never mis-delivered.
+    private func matchPendingID(for key: String) -> UInt64? {
+        if let id = oldestPendingID(for: key) { return id }
+        let (path, params) = Self.parseKey(key)
+        return pendingCommands.values
+            .filter { pending in
+                let (pendingPath, pendingParams) = Self.parseKey(pending.commandKey)
+                guard pendingPath == path else { return false }
+                return params.allSatisfy { name, value in pendingParams[name].map { $0 == value } ?? true }
+                    && pendingParams.allSatisfy { name, value in params[name].map { $0 == value } ?? true }
+            }
             .min(by: { $0.id < $1.id })?
             .id
     }
 
+    /// Splits a matching key back into its command path and parameters.
+    private static func parseKey(_ key: String) -> (path: String, params: [String: String]) {
+        guard let bar = key.firstIndex(of: "|") else { return (key, [:]) }
+        var params: [String: String] = [:]
+        for pair in key[key.index(after: bar)...].split(separator: "&") {
+            let sides = pair.split(separator: "=", maxSplits: 1)
+            if sides.count == 2 { params[String(sides[0])] = String(sides[1]) }
+        }
+        return (String(key[..<bar]), params)
+    }
+
     /// Reset the timeout for a pending command when the device sends "command under process".
     private func resetTimeout(for commandKey: String) {
-        guard let id = oldestPendingID(for: commandKey),
+        guard let id = matchPendingID(for: commandKey),
               let existing = pendingCommands.removeValue(forKey: id) else { return }
         existing.timeoutTask.cancel()
         let duration = existing.timeoutDuration
@@ -296,41 +312,40 @@ public actor HEOSConnection {
 
     // MARK: - Response Matching
 
-    /// Builds a matching key from a command. For browse commands, includes the SID
-    /// (and CID when present) so responses are routed to the correct caller.
-    /// Without CID in the key, a concurrent `browseSource(sid: X)` and
-    /// `browseSourceContainer(sid: X, cid: Y)` share a FIFO queue, and
-    /// out-of-order responses (e.g. after "command under process") get swapped.
-    /// CIDs are normalized via percent-decoding because the device echoes them
-    /// decoded even when they were sent encoded (e.g. TuneIn URL-based CIDs).
+    /// Matching key for a command: its path plus the discriminating parameters (sid/cid/scid for
+    /// browse, pid/gid elsewhere, range for get_queue) so concurrent same-path commands don't swap responses.
     private static func matchingKey(for command: HEOSCommand) -> String {
         switch command {
-        case .browseSource(let sid, _):
-            return "browse/browse|sid=\(sid)"
-        case .browseSourceContainer(let sid, let cid, _):
-            return "browse/browse|sid=\(sid)&cid=\(normalizeCID(cid))"
-        case .search(let sid, _, let scid, _):
-            return "browse/search|sid=\(sid)&scid=\(scid)"
+        case .browseSource(let sid, let range):
+            return "browse/browse|sid=\(sid)" + rangeSuffix(range)
+        case .browseSourceContainer(let sid, let cid, let range):
+            return "browse/browse|sid=\(sid)&cid=\(normalizeCID(cid))" + rangeSuffix(range)
+        case .search(let sid, let term, let scid, let range):
+            return "browse/search|sid=\(sid)&scid=\(scid)&search=\(normalizeCID(term))" + rangeSuffix(range)
         case .getSearchCriteria(let sid):
             return "browse/get_search_criteria|sid=\(sid)"
+        case .getQueue(let pid, let range):
+            return "player/get_queue|pid=\(pid)" + rangeSuffix(range)
         default:
+            if let pid = command.pid { return "\(command.commandPath)|pid=\(pid)" }
+            if let gid = command.gid { return "\(command.commandPath)|gid=\(gid)" }
             return command.commandPath
         }
     }
 
-    /// Reconstructs the matching key from a response by extracting SID (and CID
-    /// when present) from the message parameters. Mirrors `matchingKey(for:)`.
-    private static func responseMatchingKey(for response: HEOSResponse) -> String {
-        if let sid = response.message["sid"] {
-            switch response.command {
+    /// Mirror of `matchingKey(for:)`, rebuilt from the parameters a response or error echoes back.
+    private static func matchingKey(command: String, message: [String: String]) -> String {
+        let echoedRange = message["range"].map { "&range=\($0)" } ?? ""
+        if let sid = message["sid"] {
+            switch command {
             case "browse/browse":
-                if let cid = response.message["cid"] {
-                    return "browse/browse|sid=\(sid)&cid=\(normalizeCID(cid))"
+                if let cid = message["cid"] {
+                    return "browse/browse|sid=\(sid)&cid=\(normalizeCID(cid))" + echoedRange
                 }
-                return "browse/browse|sid=\(sid)"
+                return "browse/browse|sid=\(sid)" + echoedRange
             case "browse/search":
-                if let scid = response.message["scid"] {
-                    return "browse/search|sid=\(sid)&scid=\(scid)"
+                if let scid = message["scid"], let term = message["search"] {
+                    return "browse/search|sid=\(sid)&scid=\(scid)&search=\(normalizeCID(term))" + echoedRange
                 }
                 return "browse/search|sid=\(sid)"
             case "browse/get_search_criteria":
@@ -339,30 +354,22 @@ public actor HEOSConnection {
                 break
             }
         }
-        return response.command
+        if let pid = message["pid"] {
+            if command == "player/get_queue" {
+                return "player/get_queue|pid=\(pid)" + echoedRange
+            }
+            return "\(command)|pid=\(pid)"
+        }
+        if let gid = message["gid"] {
+            return "\(command)|gid=\(gid)"
+        }
+        return command
     }
 
-    /// Reconstructs the matching key from an error response.
-    private static func errorMatchingKey(for error: HEOSError) -> String {
-        if let sid = error.message["sid"] {
-            switch error.command {
-            case "browse/browse":
-                if let cid = error.message["cid"] {
-                    return "browse/browse|sid=\(sid)&cid=\(normalizeCID(cid))"
-                }
-                return "browse/browse|sid=\(sid)"
-            case "browse/search":
-                if let scid = error.message["scid"] {
-                    return "browse/search|sid=\(sid)&scid=\(scid)"
-                }
-                return "browse/search|sid=\(sid)"
-            case "browse/get_search_criteria":
-                return "browse/get_search_criteria|sid=\(sid)"
-            default:
-                break
-            }
-        }
-        return error.command
+    /// Key fragment for an optional range, formatted as it is sent and echoed on the wire.
+    private static func rangeSuffix(_ range: ClosedRange<Int>?) -> String {
+        guard let range else { return "" }
+        return "&range=\(range.lowerBound),\(range.upperBound)"
     }
 
     /// Fully percent-decodes a CID for matching key normalization.
