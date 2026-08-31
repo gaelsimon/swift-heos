@@ -106,10 +106,12 @@ public actor BrowseService {
     }
 
     public func addToQueue(pid: Int, sid: Int, cid: String, mid: String? = nil, criteria: AddCriteria) async throws {
+        // DLNA servers resolving a searched mid can take 30s+ before the device answers.
+        let timeout: Duration = .seconds(60)
         if let mid {
-            try await connection.send(.addTrackToQueue(pid: pid, sid: sid, cid: cid, mid: mid, aid: criteria))
+            try await connection.send(.addTrackToQueue(pid: pid, sid: sid, cid: cid, mid: mid, aid: criteria), timeout: timeout)
         } else {
-            try await connection.send(.addContainerToQueue(pid: pid, sid: sid, cid: cid, aid: criteria))
+            try await connection.send(.addContainerToQueue(pid: pid, sid: sid, cid: cid, aid: criteria), timeout: timeout)
         }
     }
 
