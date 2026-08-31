@@ -3,23 +3,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "HEOSKit",
+    name: "swift-heos",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .library(name: "HEOSKit", targets: ["HEOSKit"])
-    ],
-    dependencies: [
-        .package(path: "../NeosDomain")
+        .library(name: "HEOSKit", targets: ["HEOSKit"]),
+        .library(name: "NeosDomain", targets: ["NeosDomain"])
     ],
     targets: [
+        .target(name: "NeosDomain", path: "Sources/NeosDomain"),
         .target(
             name: "HEOSKit",
-            dependencies: [
-                .product(name: "NeosDomain", package: "NeosDomain")
-            ],
+            dependencies: ["NeosDomain"],
             path: "Sources/HEOSKit"
+        ),
+        .testTarget(
+            name: "NeosDomainTests",
+            dependencies: ["NeosDomain"],
+            path: "Tests/NeosDomainTests"
         ),
         .testTarget(
             name: "HEOSKitTests",
