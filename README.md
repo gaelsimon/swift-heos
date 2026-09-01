@@ -1,5 +1,8 @@
 # swift-heos
 
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fgaelsimon%2Fswift-heos%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/gaelsimon/swift-heos)
+[![](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fgaelsimon%2Fswift-heos%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/gaelsimon/swift-heos)
+
 A Swift library for the HEOS CLI protocol, the TCP interface that Denon and Marantz
 devices expose on port 1255 to control HEOS speakers, amplifiers and AV receivers.
 
