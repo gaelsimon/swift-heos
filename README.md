@@ -25,6 +25,21 @@ HEOS controller, where it runs daily against real hardware.
 .product(name: "HEOSKit", package: "swift-heos")
 ```
 
+## Platforms
+
+macOS 14+ and iOS 17+.
+
+Discovery races SSDP against Bonjour and merges the results, so it degrades to whichever
+one answers. That matters on iOS, where SSDP needs entitlements the app must carry:
+
+- `com.apple.developer.networking.multicast`, which Apple grants on request, to join
+  `239.255.255.250` and send `M-SEARCH`.
+- `NSLocalNetworkUsageDescription` in the Info.plist, for the local network prompt.
+
+Without them SSDP fails and discovery returns Bonjour results alone, which is enough to
+find a device and connect. The failure is logged under the `discovery` category of the
+`com.galela.neos.HEOSKit` subsystem rather than surfaced as an error.
+
 ## Usage
 
 `HEOSService` pushes state into a `StateUpdater` you implement.

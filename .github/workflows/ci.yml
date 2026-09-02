@@ -24,3 +24,23 @@ jobs:
 
       - name: Run tests
         run: swift test
+
+  ios-build:
+    name: iOS build
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16'
+
+      # Compile-only: guards against macOS-only API creeping back in, which `swift test`
+      # cannot catch because it always builds for the host.
+      - name: Build for iOS
+        run: |
+          xcodebuild -scheme HEOSKit \
+            -destination 'generic/platform=iOS' \
+            -skipPackagePluginValidation \
+            build
