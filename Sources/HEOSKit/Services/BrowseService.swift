@@ -56,25 +56,42 @@ public actor BrowseService {
         let criteriaID: Int
     }
 
-    /// Consecutive system errors per target, and the error to raise once one is left alone.
+    /// A target left alone until a deadline, and the error to raise until then.
+    private struct SkippedTarget {
+        let error: HEOSError
+        let until: ContinuousClock.Instant
+    }
+
     private var searchFailures: [SearchTarget: Int] = [:]
-    private var refusedSearches: [SearchTarget: HEOSError] = [:]
+    private var skipped: [SearchTarget: SkippedTarget] = [:]
+    private var reportedTargets: Set<SearchTarget> = []
+    private let now: @Sendable () -> ContinuousClock.Instant
 
     /// Errors that mean the source, not the request: the device relaying a server that broke.
     private static let systemErrorID = 12
 
     /// One failure is not enough to tell a server that cannot search from one that was busy.
-    private static let failuresBeforeGivingUp = 2
+    private static let failuresBeforeSkipping = 2
+
+    /// Long enough to cover a burst of type-ahead searches, short enough that a server waking
+    /// up is asked again before whoever is typing has noticed.
+    private static let skipWindow: Duration = .seconds(3)
 
     public init(connection: HEOSConnection) {
+        self.init(connection: connection, now: { ContinuousClock.now })
+    }
+
+    init(connection: HEOSConnection, now: @escaping @Sendable () -> ContinuousClock.Instant) {
         self.connection = connection
+        self.now = now
     }
 
     public func getMusicSources() async throws -> [MusicSource] {
         let response = try await connection.send(.getMusicSources)
-        // A re-read source list is where a server that was asleep earns another try.
+        // A re-read source list is a new set of servers; what the old ones did means nothing.
         searchFailures.removeAll()
-        refusedSearches.removeAll()
+        skipped.removeAll()
+        reportedTargets.removeAll()
         return parser.parseMusicSources(response)
     }
 
@@ -94,14 +111,15 @@ public actor BrowseService {
         return parser.parseBrowseResult(response)
     }
 
-    /// Raises the recorded error without asking again once a target has failed enough times.
-    /// Some DLNA servers publish criteria they cannot honour, and a caller searching every
-    /// source spends the browse gate -- which is serial -- on requests that cannot succeed,
-    /// so the ones that would answer wait behind them.
+    /// Raises the recorded error without asking again while a target is inside its skip window.
     public func search(sid: Int, query: String, criteriaID: Int, range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
         let target = SearchTarget(sid: sid, criteriaID: criteriaID)
-        if let refused = refusedSearches[target] { throw refused }
-
+        if let skip = skipped[target] {
+            guard now() >= skip.until else { throw skip.error }
+            // The window is over; the next answer decides, not the last one.
+            skipped[target] = nil
+            searchFailures[target] = nil
+        }
         try await acquireBrowseGate()
         defer { releaseBrowseGate() }
         try Task.checkCancellation()
@@ -115,14 +133,17 @@ public actor BrowseService {
         }
     }
 
-    /// Counts a system error against a target and stops asking once it has failed enough.
+    /// Leaves a target alone for the skip window once it has failed enough, and reports it once.
+    /// The window is short on purpose: standby keeps a server in the source list, failing like
+    /// one that cannot search at all, and nothing announces that it woke.
     private func noteSearchFailure(_ target: SearchTarget, _ error: HEOSError) {
         let count = (searchFailures[target] ?? 0) + 1
         searchFailures[target] = count
-        guard count >= Self.failuresBeforeGivingUp else { return }
-        refusedSearches[target] = error
+        guard count >= Self.failuresBeforeSkipping else { return }
+        skipped[target] = SkippedTarget(error: error, until: now().advanced(by: Self.skipWindow))
+        guard reportedTargets.insert(target).inserted else { return }
         HEOSLogger.service.info(
-            "Leaving search on sid \(target.sid) criteria \(target.criteriaID) alone after \(count) system errors"
+            "Search on sid \(target.sid) criteria \(target.criteriaID) keeps failing: \(error.text, privacy: .public)"
         )
     }
 

@@ -40,42 +40,94 @@ struct BrowseServiceTests {
 
     // MARK: - Search Capability
 
-    @Test func aTargetFailingWithSystemErrorsIsLeftAlone() async throws {
-        let (service, transport, connection) = try await makeSetup()
-        for _ in 0..<4 {
+    /// A clock the test moves by hand, so the skip window costs no waiting.
+    private final class TestClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private let base = ContinuousClock.now
+        private var offset: Duration = .zero
+
+        var instant: ContinuousClock.Instant {
+            lock.lock()
+            defer { lock.unlock() }
+            return base.advanced(by: offset)
+        }
+
+        func advance(by amount: Duration) {
+            lock.lock()
+            defer { lock.unlock() }
+            offset += amount
+        }
+    }
+
+    private func makeSetupWithClock() async throws -> (BrowseService, MockTCPTransport, HEOSConnection, TestClock) {
+        let transport = MockTCPTransport(autoRespond: true)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        try await Task.sleep(for: .milliseconds(50))
+        let clock = TestClock()
+        let service = BrowseService(connection: connection, now: { clock.instant })
+        return (service, transport, connection, clock)
+    }
+
+    @Test func repeatedSystemErrorsLeaveATargetAloneBriefly() async throws {
+        let (service, transport, connection, _) = try await makeSetupWithClock()
+        for _ in 0..<5 {
             await transport.enqueueResponse(makeSearchSystemError(sid: -2116790550, scid: 1, query: "x"))
         }
 
-        for _ in 0..<4 {
+        for _ in 0..<5 {
             await searchIgnoringError(service, sid: -2116790550, scid: 1, query: "x")
         }
 
-        // Two reached the wire; the rest raised the recorded error without asking.
+        // Two reached the wire; the burst behind them raised the recorded error.
         #expect(await transport.sentData.count == 2)
         await connection.disconnect()
     }
 
-    @Test func aSuccessfulSearchForgivesAnEarlierFailure() async throws {
-        let (service, transport, connection) = try await makeSetup()
-        await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
-        await transport.enqueueResponse(makeResponse(command: "browse/search", message: "sid=9&search=x&scid=1&returned=0&count=0", payload: "[]"))
+    @Test func theSkipWindowExpires() async throws {
+        let (service, transport, connection, clock) = try await makeSetupWithClock()
         for _ in 0..<3 {
             await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
         }
+        for _ in 0..<3 {
+            await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        }
+        #expect(await transport.sentData.count == 2)
 
-        for _ in 0..<5 {
+        clock.advance(by: .seconds(4))
+        await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+
+        #expect(await transport.sentData.count == 3)
+        await connection.disconnect()
+    }
+
+    @Test func aWokenServerIsSearchableAgainOnceTheWindowIsOver() async throws {
+        let (service, transport, connection, clock) = try await makeSetupWithClock()
+        for _ in 0..<2 {
+            await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        }
+        for _ in 0..<2 {
             await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
         }
 
-        // The success clears the count, so the two failures after it both reach the wire and
-        // only the fifth search is refused. Without the reset the first failure would already
-        // count towards the limit and the fourth would be the one refused.
-        #expect(await transport.sentData.count == 4)
+        clock.advance(by: .seconds(4))
+        await transport.enqueueResponse(makeResponse(
+            command: "browse/search",
+            message: "sid=9&search=x&scid=1&returned=1&count=1",
+            payload: """
+            [{"container":"no","name":"Woken Up","type":"song","mid":"m1","playable":"yes","image_url":""}]
+            """
+        ))
+
+        let result = try await service.search(sid: 9, query: "x", criteriaID: 1)
+
+        #expect(result.items.first?.name == "Woken Up")
         await connection.disconnect()
     }
 
     @Test func criteriaAreCountedSeparately() async throws {
-        let (service, transport, connection) = try await makeSetup()
+        let (service, transport, connection, _) = try await makeSetupWithClock()
         for scid in [1, 2] {
             for _ in 0..<2 {
                 await transport.enqueueResponse(makeSearchSystemError(sid: 7, scid: scid, query: "x"))
@@ -93,30 +145,30 @@ struct BrowseServiceTests {
         await connection.disconnect()
     }
 
-    @Test func anErrorThatIsNotASystemErrorKeepsTheTargetInPlay() async throws {
-        let (service, transport, connection) = try await makeSetup()
-        for _ in 0..<3 {
+    @Test func anErrorThatIsNotASystemErrorNeverSkips() async throws {
+        let (service, transport, connection, _) = try await makeSetupWithClock()
+        for _ in 0..<4 {
             await transport.enqueueResponse("""
             {"heos":{"command":"browse/search","result":"fail","message":"eid=6&text=Invalid ID&sid=9&search=x&scid=1"}}
             """)
         }
 
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
         }
 
-        #expect(await transport.sentData.count == 3)
+        #expect(await transport.sentData.count == 4)
         await connection.disconnect()
     }
 
-    @Test func rereadingTheSourceListGivesEveryTargetAnotherTry() async throws {
-        let (service, transport, connection) = try await makeSetup()
+    @Test func rereadingTheSourceListClearsEverySkip() async throws {
+        let (service, transport, connection, _) = try await makeSetupWithClock()
         for _ in 0..<2 {
             await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
         }
-        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
-        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
-        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        for _ in 0..<3 {
+            await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        }
         #expect(await transport.sentData.count == 2)
 
         await transport.enqueueResponse(makeResponse(command: "browse/get_music_sources", payload: "[]"))
