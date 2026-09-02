@@ -144,7 +144,9 @@ public actor HEOSConnection {
         try await transport.send(data)
     }
 
+    /// Finishes the stream it replaces: an abandoned continuation never ends its `for await`.
     public func makeEventStream() -> AsyncStream<HEOSEvent> {
+        eventContinuation?.finish()
         let (stream, continuation) = AsyncStream<HEOSEvent>.makeStream()
         self.eventContinuation = continuation
         return stream

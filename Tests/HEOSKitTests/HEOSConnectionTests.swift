@@ -376,6 +376,35 @@ struct HEOSConnectionTests {
 
     // MARK: - Events
 
+    @Test func makingASecondEventStreamEndsTheFirst() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        let firstStream = await connection.makeEventStream()
+        _ = await connection.makeEventStream()
+
+        // Bounded on purpose: an orphaned continuation never ends its `for await`, so draining
+        // the stream unbounded would hang the suite instead of reporting a failure.
+        let ended = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in firstStream {}
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        #expect(ended)
+
+        await connection.disconnect()
+    }
+
     @Test func eventsAreDeliveredToStream() async throws {
         let transport = MockTCPTransport(autoRespond: false)
         let connection = HEOSConnection(transport: transport)
