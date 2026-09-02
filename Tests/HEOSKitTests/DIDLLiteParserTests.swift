@@ -189,6 +189,36 @@ struct DIDLLiteParserTests {
         #expect(metadata?.genre == nil)
     }
 
+    // MARK: - Multiple res elements
+
+    @Test func firstResWinsEvenWithoutAttributes() {
+        // An item may carry alternate renditions. The first res describes what is playing,
+        // including when it carries nothing: a later one must not stand in for it.
+        let xml = """
+        <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">
+          <item>
+            <res>http://low</res>
+            <res sampleFrequency="96000" bitsPerSample="24">http://high</res>
+          </item>
+        </DIDL-Lite>
+        """
+        #expect(DIDLLiteParser.parse(xml) == nil)
+    }
+
+    @Test func firstResWinsOverALaterRendition() {
+        let xml = """
+        <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">
+          <item>
+            <res protocolInfo="http-get:*:audio/mpeg:*" sampleFrequency="44100">http://low</res>
+            <res protocolInfo="http-get:*:audio/flac:*" sampleFrequency="96000">http://high</res>
+          </item>
+        </DIDL-Lite>
+        """
+        let metadata = DIDLLiteParser.parse(xml)
+        #expect(metadata?.sampleRate == 44100)
+        #expect(metadata?.codec == "MP3")
+    }
+
     // MARK: - Empty / nil input
 
     @Test func returnsNilForNilInput() {

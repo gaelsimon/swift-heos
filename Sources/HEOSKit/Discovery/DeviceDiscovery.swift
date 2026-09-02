@@ -3,6 +3,7 @@ import Foundation
 public struct DeviceDiscovery: Sendable {
     private let ssdp = SSDPDiscovery()
     private let bonjour = BonjourDiscovery()
+    private let ssdpFailures = SSDPFailureReporter()
 
     public init() {}
 
@@ -17,8 +18,28 @@ public struct DeviceDiscovery: Sendable {
         return Self.mergeDevices(ssdp: ssdpResults, bonjour: bonjourResults)
     }
 
+    /// Never throws: Bonjour alone is usable, and is all iOS has without the multicast entitlement.
+    /// Reported on change only, continuous discovery calling this every few seconds all session.
     private func discoverViaSSDP(timeout: TimeInterval) async -> [DiscoveredDevice] {
-        guard let responses = try? await ssdp.search(timeout: timeout) else { return [] }
+        let responses: [SSDPResponse]
+        do {
+            responses = try await ssdp.search(timeout: timeout)
+            if await ssdpFailures.recovered() {
+                HEOSLogger.discovery.info("SSDP search recovered")
+            }
+        } catch {
+            let reason = String(describing: error)
+            if await ssdpFailures.shouldReport(reason) {
+                HEOSLogger.discovery.warning(
+                    """
+                    SSDP search failed, continuing with Bonjour only: \(reason, privacy: .public). \
+                    On iOS this needs the com.apple.developer.networking.multicast entitlement \
+                    and NSLocalNetworkUsageDescription.
+                    """
+                )
+            }
+            return []
+        }
 
         return await withTaskGroup(of: DiscoveredDevice.self, returning: [DiscoveredDevice].self) { group in
             for response in responses {
@@ -138,5 +159,27 @@ enum UPnPDeviceDescription {
         let value = String(xml[openRange.upperBound..<closeRange.lowerBound])
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+}
+
+
+// MARK: - Failure Reporting
+
+/// Collapses a repeating SSDP failure into one report, and notes when it clears.
+actor SSDPFailureReporter {
+    private var reported: String?
+
+    /// True the first time a reason is seen, and again only when the reason changes.
+    func shouldReport(_ reason: String) -> Bool {
+        guard reported != reason else { return false }
+        reported = reason
+        return true
+    }
+
+    /// True when a previously reported failure has just stopped happening.
+    func recovered() -> Bool {
+        guard reported != nil else { return false }
+        reported = nil
+        return true
     }
 }
