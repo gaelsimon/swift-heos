@@ -219,6 +219,34 @@ struct DIDLLiteParserTests {
         #expect(metadata?.codec == "MP3")
     }
 
+    // MARK: - Documents that break mid-way
+
+    @Test func fieldsReadBeforeAControlCharacterAreKept() {
+        // Captured shape: the device put a raw backspace inside an artist name, which is not a
+        // legal XML character. XMLDocument rejected the whole document over it.
+        let xml = """
+        <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"
+                   xmlns:dc="http://purl.org/dc/elements/1.1/"
+                   xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">
+          <item>
+            <res protocolInfo="http-get:*:*:*" bitrate="128000" sampleFrequency="44100">http://s</res>
+            <desc id="audioFormat" nameSpace="urn:schemas-denon-com:metadata/">MP3</desc>
+            <dc:creator>Lest\u{8}er Young</dc:creator>
+          </item>
+        </DIDL-Lite>
+        """
+        let metadata = DIDLLiteParser.parse(xml)
+        #expect(metadata?.sampleRate == 44100)
+        #expect(metadata?.bitrate == 128_000)
+        #expect(metadata?.codec == "MP3")
+        #expect(metadata?.qualityDescription == "128 kbps MP3")
+    }
+
+    @Test func aDocumentBreakingBeforeAnyItemStillReturnsNil() {
+        let xml = "<DIDL-Lite><cont\u{8}ainer>"
+        #expect(DIDLLiteParser.parse(xml) == nil)
+    }
+
     // MARK: - Empty / nil input
 
     @Test func returnsNilForNilInput() {
@@ -294,6 +322,46 @@ struct TrackMetadataQualityTests {
 
     @Test func sampleRateWithCodec() {
         let meta = TrackMetadata(sampleRate: 44100, codec: "MP3")
+        #expect(meta.qualityDescription == "44.1 kHz MP3")
+    }
+
+    @Test func lossyShowsItsBitrateRatherThanItsSampleRate() {
+        // 44.1 kHz is universal on lossy, so it separates nothing. The bitrate does.
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 128_000, codec: "MP3")
+        #expect(meta.qualityDescription == "128 kbps MP3")
+    }
+
+    @Test func twoStationsAtDifferentBitratesReadDifferently() {
+        let low = TrackMetadata(sampleRate: 44100, bitrate: 64_000, codec: "MP3")
+        let high = TrackMetadata(sampleRate: 44100, bitrate: 320_000, codec: "MP3")
+        #expect(low.qualityDescription == "64 kbps MP3")
+        #expect(high.qualityDescription == "320 kbps MP3")
+    }
+
+    @Test func alosslessCodecWithoutABitDepthKeepsItsSampleRate() {
+        // Some servers omit bitsPerSample on a lossless file. Its bitrate describes the file,
+        // not the quality, so reading "900 kbps FLAC" would mislead.
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 900_000, codec: "FLAC")
+        #expect(meta.qualityDescription == "44.1 kHz FLAC")
+    }
+
+    @Test func anUnknownCodecWithoutABitDepthStillShowsItsBitrate() {
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 128_000, codec: nil)
+        #expect(meta.qualityDescription == "128 kbps")
+    }
+
+    @Test func losslessKeepsItsSampleRateEvenWithABitrate() {
+        let meta = TrackMetadata(sampleRate: 96000, bitDepth: 24, bitrate: 4_608_000, codec: "FLAC")
+        #expect(meta.qualityDescription == "24-bit / 96 kHz FLAC")
+    }
+
+    @Test func lossyWithoutABitrateFallsBackToItsSampleRate() {
+        let meta = TrackMetadata(sampleRate: 48000, codec: "AAC")
+        #expect(meta.qualityDescription == "48 kHz AAC")
+    }
+
+    @Test func aBitrateTooSmallToRenderFallsBackToTheSampleRate() {
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 500, codec: "MP3")
         #expect(meta.qualityDescription == "44.1 kHz MP3")
     }
 

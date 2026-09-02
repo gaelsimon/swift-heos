@@ -119,14 +119,21 @@ private final class ItemCollector: NSObject, XMLParserDelegate {
     private var text = ""
     private var sawAudioFormat = false
 
-    /// Returns nil when the document is malformed or holds no `item`, as the XPath lookup did.
+    /// Returns nil only when no `item` was reached. A document that breaks later still yields
+    /// what came before: devices send a stray control character in an artist name often enough,
+    /// and SAX reports each element as it reads it, so the fields already in hand are sound.
+    /// `XMLDocument` could not do this -- it rejected the whole document.
     static func collect(from xml: String) -> ItemCollector? {
         let collector = ItemCollector()
         let parser = XMLParser(data: Data(xml.utf8))
         parser.delegate = collector
         // Never fetch external entities: this XML comes off the network (XXE).
         parser.shouldResolveExternalEntities = false
-        guard parser.parse(), collector.itemDepth != nil else { return nil }
+        let parsed = parser.parse()
+        guard collector.itemDepth != nil else { return nil }
+        if !parsed {
+            HEOSLogger.upnp.debug("DIDL-Lite broke mid-document; keeping the fields read before it")
+        }
         return collector
     }
 
