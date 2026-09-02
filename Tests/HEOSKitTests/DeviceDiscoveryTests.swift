@@ -102,3 +102,49 @@ final class DeviceDiscoveryTests: XCTestCase {
         XCTAssertEqual(result[0].port, 1256)
     }
 }
+
+final class SSDPFailureReporterTests: XCTestCase {
+
+    func testReportsTheFirstFailureOnly() async {
+        let reporter = SSDPFailureReporter()
+        let first = await reporter.shouldReport("bind failed")
+        let second = await reporter.shouldReport("bind failed")
+        let third = await reporter.shouldReport("bind failed")
+        XCTAssertTrue(first)
+        XCTAssertFalse(second)
+        XCTAssertFalse(third)
+    }
+
+    func testReportsAgainWhenTheReasonChanges() async {
+        let reporter = SSDPFailureReporter()
+        let bind = await reporter.shouldReport("bind failed")
+        let send = await reporter.shouldReport("sendto failed")
+        let sendAgain = await reporter.shouldReport("sendto failed")
+        XCTAssertTrue(bind)
+        XCTAssertTrue(send)
+        XCTAssertFalse(sendAgain)
+    }
+
+    func testRecoveryIsNotReportedWithoutAFailure() async {
+        let reporter = SSDPFailureReporter()
+        let recovered = await reporter.recovered()
+        XCTAssertFalse(recovered)
+    }
+
+    func testRecoveryIsReportedOnce() async {
+        let reporter = SSDPFailureReporter()
+        _ = await reporter.shouldReport("bind failed")
+        let first = await reporter.recovered()
+        let second = await reporter.recovered()
+        XCTAssertTrue(first)
+        XCTAssertFalse(second)
+    }
+
+    func testAFailureAfterRecoveryIsReportedAgain() async {
+        let reporter = SSDPFailureReporter()
+        _ = await reporter.shouldReport("bind failed")
+        _ = await reporter.recovered()
+        let again = await reporter.shouldReport("bind failed")
+        XCTAssertTrue(again)
+    }
+}
