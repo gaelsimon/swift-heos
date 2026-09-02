@@ -48,12 +48,33 @@ public actor BrowseService {
         }
     }
 
+    // MARK: - Search Capability
+
+    /// One thing a source can be asked to search: a criteria on a source.
+    private struct SearchTarget: Hashable {
+        let sid: Int
+        let criteriaID: Int
+    }
+
+    /// Consecutive system errors per target, and the error to raise once one is left alone.
+    private var searchFailures: [SearchTarget: Int] = [:]
+    private var refusedSearches: [SearchTarget: HEOSError] = [:]
+
+    /// Errors that mean the source, not the request: the device relaying a server that broke.
+    private static let systemErrorID = 12
+
+    /// One failure is not enough to tell a server that cannot search from one that was busy.
+    private static let failuresBeforeGivingUp = 2
+
     public init(connection: HEOSConnection) {
         self.connection = connection
     }
 
     public func getMusicSources() async throws -> [MusicSource] {
         let response = try await connection.send(.getMusicSources)
+        // A re-read source list is where a server that was asleep earns another try.
+        searchFailures.removeAll()
+        refusedSearches.removeAll()
         return parser.parseMusicSources(response)
     }
 
@@ -73,12 +94,36 @@ public actor BrowseService {
         return parser.parseBrowseResult(response)
     }
 
+    /// Raises the recorded error without asking again once a target has failed enough times.
+    /// Some DLNA servers publish criteria they cannot honour, and a caller searching every
+    /// source spends the browse gate -- which is serial -- on requests that cannot succeed,
+    /// so the ones that would answer wait behind them.
     public func search(sid: Int, query: String, criteriaID: Int, range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
+        let target = SearchTarget(sid: sid, criteriaID: criteriaID)
+        if let refused = refusedSearches[target] { throw refused }
+
         try await acquireBrowseGate()
         defer { releaseBrowseGate() }
         try Task.checkCancellation()
-        let response = try await connection.send(.search(sid: sid, searchString: query, searchCriteriaID: criteriaID, range: range))
-        return parser.parseBrowseResult(response)
+        do {
+            let response = try await connection.send(.search(sid: sid, searchString: query, searchCriteriaID: criteriaID, range: range))
+            searchFailures[target] = nil
+            return parser.parseBrowseResult(response)
+        } catch let error as HEOSError where error.errorID == Self.systemErrorID {
+            noteSearchFailure(target, error)
+            throw error
+        }
+    }
+
+    /// Counts a system error against a target and stops asking once it has failed enough.
+    private func noteSearchFailure(_ target: SearchTarget, _ error: HEOSError) {
+        let count = (searchFailures[target] ?? 0) + 1
+        searchFailures[target] = count
+        guard count >= Self.failuresBeforeGivingUp else { return }
+        refusedSearches[target] = error
+        HEOSLogger.service.info(
+            "Leaving search on sid \(target.sid) criteria \(target.criteriaID) alone after \(count) system errors"
+        )
     }
 
     public func getSearchCriteria(sid: Int) async throws -> [SearchCriteria] {

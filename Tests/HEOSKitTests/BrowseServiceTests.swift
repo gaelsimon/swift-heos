@@ -27,6 +27,108 @@ struct BrowseServiceTests {
         return (service, transport, connection)
     }
 
+    /// A search failure shaped like the one a DLNA server that cannot search produces.
+    private func makeSearchSystemError(sid: Int, scid: Int, query: String) -> String {
+        """
+        {"heos":{"command":"browse/search","result":"fail","message":"eid=12&text=System error&syserrno=-15&sid=\(sid)&search=\(query)&scid=\(scid)"}}
+        """
+    }
+
+    private func searchIgnoringError(_ service: BrowseService, sid: Int, scid: Int, query: String) async {
+        _ = try? await service.search(sid: sid, query: query, criteriaID: scid)
+    }
+
+    // MARK: - Search Capability
+
+    @Test func aTargetFailingWithSystemErrorsIsLeftAlone() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        for _ in 0..<4 {
+            await transport.enqueueResponse(makeSearchSystemError(sid: -2116790550, scid: 1, query: "x"))
+        }
+
+        for _ in 0..<4 {
+            await searchIgnoringError(service, sid: -2116790550, scid: 1, query: "x")
+        }
+
+        // Two reached the wire; the rest raised the recorded error without asking.
+        #expect(await transport.sentData.count == 2)
+        await connection.disconnect()
+    }
+
+    @Test func aSuccessfulSearchForgivesAnEarlierFailure() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        await transport.enqueueResponse(makeResponse(command: "browse/search", message: "sid=9&search=x&scid=1&returned=0&count=0", payload: "[]"))
+        for _ in 0..<3 {
+            await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        }
+
+        for _ in 0..<5 {
+            await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        }
+
+        // The success clears the count, so the two failures after it both reach the wire and
+        // only the fifth search is refused. Without the reset the first failure would already
+        // count towards the limit and the fourth would be the one refused.
+        #expect(await transport.sentData.count == 4)
+        await connection.disconnect()
+    }
+
+    @Test func criteriaAreCountedSeparately() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        for scid in [1, 2] {
+            for _ in 0..<2 {
+                await transport.enqueueResponse(makeSearchSystemError(sid: 7, scid: scid, query: "x"))
+            }
+        }
+
+        for scid in [1, 2] {
+            for _ in 0..<3 {
+                await searchIgnoringError(service, sid: 7, scid: scid, query: "x")
+            }
+        }
+
+        // Two per criteria, not two for the source.
+        #expect(await transport.sentData.count == 4)
+        await connection.disconnect()
+    }
+
+    @Test func anErrorThatIsNotASystemErrorKeepsTheTargetInPlay() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        for _ in 0..<3 {
+            await transport.enqueueResponse("""
+            {"heos":{"command":"browse/search","result":"fail","message":"eid=6&text=Invalid ID&sid=9&search=x&scid=1"}}
+            """)
+        }
+
+        for _ in 0..<3 {
+            await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        }
+
+        #expect(await transport.sentData.count == 3)
+        await connection.disconnect()
+    }
+
+    @Test func rereadingTheSourceListGivesEveryTargetAnotherTry() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        for _ in 0..<2 {
+            await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        }
+        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+        #expect(await transport.sentData.count == 2)
+
+        await transport.enqueueResponse(makeResponse(command: "browse/get_music_sources", payload: "[]"))
+        _ = try await service.getMusicSources()
+        await transport.enqueueResponse(makeSearchSystemError(sid: 9, scid: 1, query: "x"))
+        await searchIgnoringError(service, sid: 9, scid: 1, query: "x")
+
+        // get_music_sources plus one search that reached the wire again.
+        #expect(await transport.sentData.count == 4)
+        await connection.disconnect()
+    }
+
     // MARK: - getMusicSources
 
     @Test func getMusicSourcesReturnsSources() async throws {
