@@ -374,6 +374,71 @@ struct HEOSConnectionTests {
         await connection.disconnect()
     }
 
+    // MARK: - Ambiguous Matching
+
+    /// Waits for `count` writes, so a response lands only once every command it
+    /// could match is pending.
+    private func waitForSends(_ count: Int, on transport: MockTCPTransport) async throws {
+        for _ in 0..<200 {
+            if await transport.sentData.count >= count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        Issue.record("transport recorded fewer than \(count) sends")
+    }
+
+    @Test func aResponseFittingTwoPendingCommandsIsCountedAsAmbiguous() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        // Two pages of the same queue in flight together.
+        let firstPage = Task {
+            try? await connection.send(.getQueue(pid: 1, range: 0...49), timeout: .seconds(2))
+        }
+        let secondPage = Task {
+            try? await connection.send(.getQueue(pid: 1, range: 50...99), timeout: .seconds(2))
+        }
+        try await waitForSends(2, on: transport)
+
+        // A firmware echoing pid but not range leaves nothing to tell the two pages apart,
+        // so this response fits both and FIFO picks the older one -- possibly the wrong page.
+        await transport.simulateEvent("""
+        {"heos":{"command":"player/get_queue","result":"success","message":"pid=1"},"payload":[]}
+        """)
+
+        _ = await firstPage.value
+        _ = await secondPage.value
+
+        #expect(await connection.ambiguousMatchCount == 1)
+
+        await connection.disconnect()
+    }
+
+    @Test func distinctPathsInFlightAreNotAmbiguous() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        let volume = Task {
+            try? await connection.send(.getVolume(pid: 1), timeout: .seconds(2))
+        }
+        let mute = Task {
+            try? await connection.send(.getMute(pid: 1), timeout: .seconds(2))
+        }
+        try await waitForSends(2, on: transport)
+
+        await transport.simulateEvent("""
+        {"heos":{"command":"player/get_volume","result":"success","message":"pid=1&level=30"}}
+        """)
+
+        _ = await volume.value
+        _ = await mute.value
+
+        #expect(await connection.ambiguousMatchCount == 0)
+
+        await connection.disconnect()
+    }
+
     // MARK: - Events
 
     @Test func makingASecondEventStreamEndsTheFirst() async throws {

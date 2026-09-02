@@ -17,6 +17,8 @@ public actor HEOSConnection {
 
     private var nextCommandID: UInt64 = 0
     private var pendingCommands: [UInt64: PendingCommand] = [:]
+    /// Responses that fitted more than one pending command; see `recordAmbiguousMatch`.
+    private(set) var ambiguousMatchCount = 0
     private var receiveTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
 
@@ -270,16 +272,37 @@ public actor HEOSConnection {
     /// so an imperfect echo degrades to FIFO while a contradicting one is never mis-delivered.
     private func matchPendingID(for key: String) -> UInt64? {
         if let id = oldestPendingID(for: key) { return id }
+        let candidates = compatiblePendingCommands(for: key)
+        guard let oldest = candidates.min(by: { $0.id < $1.id }) else { return nil }
+        if Set(candidates.map(\.commandKey)).count > 1 {
+            recordAmbiguousMatch(key: key, candidates: candidates, resolvedTo: oldest.id)
+        }
+        return oldest.id
+    }
+
+    /// Pending commands the key could belong to: same path, and no parameter the two disagree on.
+    private func compatiblePendingCommands(for key: String) -> [PendingCommand] {
         let (path, params) = Self.parseKey(key)
-        return pendingCommands.values
-            .filter { pending in
-                let (pendingPath, pendingParams) = Self.parseKey(pending.commandKey)
-                guard pendingPath == path else { return false }
-                return params.allSatisfy { name, value in pendingParams[name].map { $0 == value } ?? true }
-                    && pendingParams.allSatisfy { name, value in params[name].map { $0 == value } ?? true }
-            }
-            .min(by: { $0.id < $1.id })?
-            .id
+        return pendingCommands.values.filter { pending in
+            let (pendingPath, pendingParams) = Self.parseKey(pending.commandKey)
+            guard pendingPath == path else { return false }
+            return params.allSatisfy { name, value in pendingParams[name].map { $0 == value } ?? true }
+                && pendingParams.allSatisfy { name, value in params[name].map { $0 == value } ?? true }
+        }
+    }
+
+    /// Counts a response that fitted more than one key: the echo omits what tells them apart, so
+    /// FIFO is a guess, not a match. Identical keys do not count, their responses being the same.
+    private func recordAmbiguousMatch(key: String, candidates: [PendingCommand], resolvedTo id: UInt64) {
+        ambiguousMatchCount += 1
+        let listed = candidates
+            .sorted { $0.id < $1.id }
+            .map { "#\($0.id):\($0.commandKey)" }
+            .joined(separator: ", ")
+        WireLog.shared.log("?? AMBIGUOUS key=\(key) candidates=[\(listed)] -> #\(id)")
+        HEOSLogger.connection.warning(
+            "Ambiguous response \(key, privacy: .public): [\(listed, privacy: .public)]; resolved FIFO to #\(id)"
+        )
     }
 
     /// Splits a matching key back into its command path and parameters.
