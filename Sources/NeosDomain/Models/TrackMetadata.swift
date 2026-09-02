@@ -46,7 +46,11 @@ public struct TrackMetadata: Sendable, Equatable {
             parts.append("\(bitDepth)-bit")
         }
 
-        if let sampleRate {
+        // A lossy source reports no bit depth, and its sample rate says nothing: 44.1 kHz is
+        // universal there. The bitrate is what separates a 64 kbps stream from a 320 kbps one.
+        if bitDepth == nil, let bitrate, bitrate >= 1000 {
+            parts.append("\(bitrate / 1000) kbps")
+        } else if let sampleRate {
             let kHz = Double(sampleRate) / 1000.0
             if kHz == kHz.rounded() {
                 parts.append("\(Int(kHz)) kHz")
