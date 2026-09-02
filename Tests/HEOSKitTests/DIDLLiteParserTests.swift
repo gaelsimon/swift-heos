@@ -338,6 +338,18 @@ struct TrackMetadataQualityTests {
         #expect(high.qualityDescription == "320 kbps MP3")
     }
 
+    @Test func alosslessCodecWithoutABitDepthKeepsItsSampleRate() {
+        // Some servers omit bitsPerSample on a lossless file. Its bitrate describes the file,
+        // not the quality, so reading "900 kbps FLAC" would mislead.
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 900_000, codec: "FLAC")
+        #expect(meta.qualityDescription == "44.1 kHz FLAC")
+    }
+
+    @Test func anUnknownCodecWithoutABitDepthStillShowsItsBitrate() {
+        let meta = TrackMetadata(sampleRate: 44100, bitrate: 128_000, codec: nil)
+        #expect(meta.qualityDescription == "128 kbps")
+    }
+
     @Test func losslessKeepsItsSampleRateEvenWithABitrate() {
         let meta = TrackMetadata(sampleRate: 96000, bitDepth: 24, bitrate: 4_608_000, codec: "FLAC")
         #expect(meta.qualityDescription == "24-bit / 96 kHz FLAC")

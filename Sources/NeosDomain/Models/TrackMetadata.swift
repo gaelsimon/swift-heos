@@ -37,6 +37,14 @@ public struct TrackMetadata: Sendable, Equatable {
         self.albumArtURI = albumArtURI
     }
 
+    /// Codecs whose bitrate describes the file, not what a listener hears.
+    private static let losslessCodecs: Set<String> = ["FLAC", "WAV", "AIFF", "PCM", "DSD", "ALAC"]
+
+    private static func isLossless(_ codec: String?) -> Bool {
+        guard let codec else { return false }
+        return losslessCodecs.contains(codec.uppercased())
+    }
+
     /// Human-readable audio quality string, e.g. "24-bit / 96 kHz FLAC".
     /// Returns nil if no audio quality info is available.
     public var qualityDescription: String? {
@@ -48,7 +56,9 @@ public struct TrackMetadata: Sendable, Equatable {
 
         // A lossy source reports no bit depth, and its sample rate says nothing: 44.1 kHz is
         // universal there. The bitrate is what separates a 64 kbps stream from a 320 kbps one.
-        if bitDepth == nil, let bitrate, bitrate >= 1000 {
+        // A lossless codec keeps the sample rate even without a bit depth, since some servers
+        // omit bitsPerSample and its bitrate describes the file rather than the quality.
+        if bitDepth == nil, let bitrate, bitrate >= 1000, !Self.isLossless(codec) {
             parts.append("\(bitrate / 1000) kbps")
         } else if let sampleRate {
             let kHz = Double(sampleRate) / 1000.0
