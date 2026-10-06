@@ -11,52 +11,37 @@ public actor SSDPNotifyListener {
     private static let heosNotificationType = "urn:schemas-denon-com:device:ACT-Denon:1"
     private static let pollIntervalMs: Int32 = 200
 
-    private var socketFD: Int32 = -1
-    private var isRunning = false
+    private var stopRequested: OSAllocatedUnfairLock<Bool>?
 
     public init() {}
 
     public func listen() -> AsyncStream<SSDPResponse> {
         let (stream, continuation) = AsyncStream<SSDPResponse>.makeStream()
 
-        guard !isRunning else { return stream }
-        isRunning = true
+        guard stopRequested == nil else { return stream }
 
         let fd: Int32
         do {
             fd = try Self.createMulticastSocket()
         } catch {
             HEOSLogger.discovery.error("Failed to create NOTIFY listener socket: \(error.localizedDescription)")
-            isRunning = false
             continuation.finish()
             return stream
         }
 
-        socketFD = fd
+        let stopRequested = OSAllocatedUnfairLock(initialState: false)
+        self.stopRequested = stopRequested
 
         DispatchQueue.global(qos: .utility).async {
-            Self.receiveLoop(fd: fd, continuation: continuation)
+            Self.receiveLoop(fd: fd, stopRequested: stopRequested, continuation: continuation)
         }
 
         return stream
     }
 
     public func stop() {
-        guard isRunning else { return }
-        isRunning = false
-
-        let fd = socketFD
-        socketFD = -1
-
-        if fd >= 0 {
-            // Drop multicast membership before closing
-            var mreq = ip_mreq()
-            inet_pton(AF_INET, Self.multicastAddress, &mreq.imr_multiaddr)
-            mreq.imr_interface.s_addr = INADDR_ANY.bigEndian
-            setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, socklen_t(MemoryLayout<ip_mreq>.size))
-
-            close(fd)
-        }
+        stopRequested?.withLock { $0 = true }
+        stopRequested = nil
     }
 
     // MARK: - Socket Setup
@@ -81,7 +66,6 @@ public actor SSDPNotifyListener {
             throw SSDPError.socketOptionFailed(option: "SO_REUSEPORT", errno: errno, detail: String(cString: strerror(errno)))
         }
 
-        // Bind to INADDR_ANY:1900 to receive multicast NOTIFY messages
         var bindAddr = sockaddr_in()
         bindAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         bindAddr.sin_family = sa_family_t(AF_INET)
@@ -97,7 +81,6 @@ public actor SSDPNotifyListener {
             throw SSDPError.bindFailed(errno: errno, detail: String(cString: strerror(errno)))
         }
 
-        // Join multicast group 239.255.255.250
         var mreq = ip_mreq()
         inet_pton(AF_INET, multicastAddress, &mreq.imr_multiaddr)
         mreq.imr_interface.s_addr = INADDR_ANY.bigEndian
@@ -110,16 +93,32 @@ public actor SSDPNotifyListener {
         return fd
     }
 
+    private static func closeMulticastSocket(_ fd: Int32) {
+        var mreq = ip_mreq()
+        inet_pton(AF_INET, multicastAddress, &mreq.imr_multiaddr)
+        mreq.imr_interface.s_addr = INADDR_ANY.bigEndian
+        setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, socklen_t(MemoryLayout<ip_mreq>.size))
+        close(fd)
+    }
+
     // MARK: - Receive Loop
 
-    private static func receiveLoop(fd: Int32, continuation: AsyncStream<SSDPResponse>.Continuation) {
+    // Only this loop closes the socket, so its descriptor number cannot be reused while the loop still polls it.
+    private static func receiveLoop(
+        fd: Int32,
+        stopRequested: OSAllocatedUnfairLock<Bool>,
+        continuation: AsyncStream<SSDPResponse>.Continuation
+    ) {
+        defer {
+            closeMulticastSocket(fd)
+            continuation.finish()
+        }
         var recvBuffer = [UInt8](repeating: 0, count: 4096)
 
-        while true {
+        while !stopRequested.withLock({ $0 }) {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let pollResult = poll(&pfd, 1, pollIntervalMs)
 
-            // Socket was closed (stop() called); poll returns error or POLLNVAL
             if pollResult < 0 || (pfd.revents & Int16(POLLNVAL)) != 0 {
                 break
             }
@@ -142,15 +141,12 @@ public actor SSDPNotifyListener {
             let data = Data(recvBuffer[..<bytesRead])
             guard let message = String(data: data, encoding: .utf8) else { continue }
 
-            // Only process NOTIFY ssdp:alive messages for HEOS devices
             guard isHeosNotifyAlive(message) else { continue }
 
             if let response = SSDPResponse.parse(message) {
                 continuation.yield(response)
             }
         }
-
-        continuation.finish()
     }
 
     private static func isHeosNotifyAlive(_ message: String) -> Bool {
