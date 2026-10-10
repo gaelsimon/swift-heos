@@ -286,11 +286,11 @@ extension HEOSService {
         // Left optional: a failed fetch must not read as "no groups", which would drop every group
         // from the sidebar and un-collapse a stereo pair until the next groups_changed.
         let fetchedGroups = await groupsResult
-        let sources = await sourcesResult ?? []
+        let sources = await sourcesResult
 
         await stateUpdater.setPlayers(players)
         if let fetchedGroups { await stateUpdater.setGroups(fetchedGroups) }
-        await stateUpdater.setMusicSources(sources)
+        if let sources { await stateUpdater.setMusicSources(sources) }
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
         Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
@@ -298,6 +298,7 @@ extension HEOSService {
         // Phase 2: remaining global state (account check may hit cloud servers)
         let signedInUser = await accountResult
         await stateUpdater.setSignedInUser(signedInUser)
+        if sources == nil { await retryMusicSources() }
 
         // Determine the correct PID; prefer cached if it still exists, then standalone speakers
         guard let preferred = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: cachedPID) else {
@@ -354,22 +355,34 @@ extension HEOSService {
         // Left optional: a failed fetch must not read as "no groups", which would drop every group
         // from the sidebar and un-collapse a stereo pair until the next groups_changed.
         let fetchedGroups = await groupsResult
-        let sources = await sourcesResult ?? []
+        let sources = await sourcesResult
 
         await stateUpdater.setPlayers(players)
         if let fetchedGroups { await stateUpdater.setGroups(fetchedGroups) }
-        await stateUpdater.setMusicSources(sources)
+        if let sources { await stateUpdater.setMusicSources(sources) }
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
         Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
 
         let signedInUser = await accountResult
         await stateUpdater.setSignedInUser(signedInUser)
+        if sources == nil { await retryMusicSources() }
 
         if let player = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: nil) {
             await connectionCoordinator.updateLastPlayerID(player.pid)
             await stateUpdater.setSelectedPlayerID(player.pid)
             await loadPlayerState(pid: player.pid)
+        }
+    }
+
+    // A device busy with the connect burst can refuse the sources request; asked alone, it answers.
+    func retryMusicSources() async {
+        guard let browseService else { return }
+        do {
+            let sources = try await browseService.getMusicSources()
+            await stateUpdater.setMusicSources(sources)
+        } catch {
+            await stateUpdater.reportNonFatal(source: "connect.sources", message: error.localizedDescription)
         }
     }
 
