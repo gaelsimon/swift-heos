@@ -24,12 +24,16 @@ actor LocalServerDirectory {
     private var names: [Int: String] = [:]
     private var clients: [Int: UPnPContentDirectoryClient] = [:]
     private var artless: Set<Container> = []
+    private var failedAt: [Container: ContinuousClock.Instant] = [:]
     private var endpoints: [MediaServerEndpoint] = []
     private var locatedAt: ContinuousClock.Instant?
     private var locating: Task<[MediaServerEndpoint], Never>?
 
     /// A server missing from the LAN is not searched for again at every row.
     static let locateCooldown: Duration = .seconds(10)
+
+    /// A container whose server was slow or refused is left alone this long, then asked again.
+    static let failureCooldown: Duration = .seconds(30)
 
     init() {
         let discovery = MediaServerDiscovery()
@@ -73,59 +77,62 @@ actor LocalServerDirectory {
         }
     }
 
-    /// Fills the art the device dropped from `result`, read from the server itself. A container
-    /// that gave none is not asked again: its later pages are the same kind of object.
+    /// Fills the art the device dropped from `result`, read from the server itself.
     func fillingArtwork(_ result: BrowseResult, sid: Int, cid: String, start: Int) async -> BrowseResult {
         let container = Container(sid: sid, cid: cid)
-        guard !artless.contains(container),
+        guard !artless.contains(container), !isCoolingDown(container),
               result.items.contains(where: { $0.imageURL.isEmpty }),
               let client = await client(for: sid),
-              let artwork = await artwork(from: client, sid: sid, cid: cid, start: start, count: result.items.count)
+              let artwork = await artwork(from: client, container: container, start: start, count: result.items.count)
         else { return result }
         let items = result.items.map { item in
             guard item.imageURL.isEmpty, let id = item.cid ?? item.mid, let url = artwork[id] else { return item }
             return Self.item(item, imageURL: url)
         }
         guard items != result.items else {
+            // Later pages of a container hold the same kind of object.
             artless.insert(container)
             return result
         }
         return BrowseResult(items: items, returned: result.returned, count: result.count, options: result.options)
     }
 
-    /// Empty when the server was slow or refused, so the container is not waited on again;
-    /// nil when there is nothing to conclude about it.
     private func artwork(
-        from client: UPnPContentDirectoryClient, sid: Int, cid: String, start: Int, count: Int
+        from client: UPnPContentDirectoryClient, container: Container, start: Int, count: Int
     ) async -> [String: String]? {
         do {
-            return try await client.childArtwork(of: cid, start: start, count: count)
+            return try await client.childArtwork(of: container.cid, start: start, count: count)
         } catch {
             switch Self.classify(error) {
             case .cancelled:
-                return nil
+                break
             case .unreachable:
-                forget(sid: sid)
-                return nil
-            case .nothingToGive:
-                return [:]
+                forget(sid: container.sid)
+            case .slowOrFailing:
+                failedAt[container] = now()
             }
+            return nil
         }
+    }
+
+    private func isCoolingDown(_ container: Container) -> Bool {
+        guard let failed = failedAt[container] else { return false }
+        return now() < failed.advanced(by: Self.failureCooldown)
     }
 
     private enum Failure {
         case cancelled
         case unreachable
-        case nothingToGive
+        case slowOrFailing
     }
 
     /// Only a server that could not be reached may have moved; a slow or failing one stays.
     private static func classify(_ error: Error) -> Failure {
         if error is CancellationError { return .cancelled }
-        guard let urlError = error as? URLError else { return .nothingToGive }
+        guard let urlError = error as? URLError else { return .slowOrFailing }
         switch urlError.code {
         case .cancelled: return .cancelled
-        case .timedOut: return .nothingToGive
+        case .timedOut: return .slowOrFailing
         default: return .unreachable
         }
     }

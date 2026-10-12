@@ -267,6 +267,7 @@ struct LocalServerDirectoryTests {
         let harness = await notedHarness()
 
         _ = await fill(harness)
+        harness.clock.advance(by: LocalServerDirectory.failureCooldown)
         _ = await fill(harness)
         #expect(hits.count == 1)
 
@@ -304,7 +305,7 @@ struct LocalServerDirectoryTests {
         #expect(hits.count == 2)
     }
 
-    @Test func aSlowServerStaysButItsContainerIsNotWaitedOnAgain() async {
+    @Test func aSlowServerStaysAndItsContainerIsAskedAgainAfterTheCooldown() async {
         let hits = CallCounter()
         register(status: URLError.timedOut.rawValue, hits: hits)
         let harness = await notedHarness()
@@ -312,10 +313,26 @@ struct LocalServerDirectoryTests {
         _ = await fill(harness)
         _ = await fill(harness)
         _ = await fill(harness, cid: "f-g")
-
         #expect(hits.count == 2)
+
+        harness.clock.advance(by: LocalServerDirectory.failureCooldown)
+        _ = await fill(harness)
+        #expect(hits.count == 3)
         #expect(harness.clients.count == 1)
         #expect(harness.locates.count == 1)
+    }
+
+    @Test func aContainerThatTimedOutGetsItsArtOnceTheServerAnswers() async {
+        let hits = CallCounter()
+        register(status: URLError.timedOut.rawValue, hits: hits)
+        let harness = await notedHarness()
+        _ = await fill(harness)
+
+        registerArtwork(["al-1": "http://nas/al-1.jpg"])
+        harness.clock.advance(by: LocalServerDirectory.failureCooldown)
+        let filled = await fill(harness)
+
+        #expect(filled.items[0].imageURL == "http://nas/al-1.jpg")
     }
 
     @Test func aSoapFaultKeepsTheServer() async {
