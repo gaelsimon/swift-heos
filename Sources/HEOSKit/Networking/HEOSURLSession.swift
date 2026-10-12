@@ -10,4 +10,12 @@ enum HEOSURLSession {
         config.timeoutIntervalForResource = 10
         return URLSession(configuration: config)
     }()
+
+    /// A browse page waits on local servers, so a slow one costs at most this much.
+    static let localServer: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 1.5
+        config.timeoutIntervalForResource = 1.5
+        return URLSession(configuration: config)
+    }()
 }

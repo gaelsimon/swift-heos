@@ -40,6 +40,16 @@ Without them SSDP fails and discovery returns Bonjour results alone, which is en
 find a device and connect. The failure is logged under the `discovery` category of the
 `com.galela.neos.HEOSKit` subsystem rather than surfaced as an error.
 
+## Local music servers
+
+HEOS relays UPnP media servers under Local Music, but drops the album art on their
+containers and lists the same search criteria for every server, including those that cannot
+search. On a local server, `browseContainer` reads the missing art from the server's own
+ContentDirectory, and `getSearchCriteria` returns an empty list when the server reports
+empty `SearchCaps`. The server is found over SSDP and matched by its friendly name, so on
+iOS this relies on the same multicast entitlement. A server that is slow or cannot be reached
+leaves the results as HEOS sent them.
+
 ## Usage
 
 `HEOSService` pushes state into a `StateUpdater` you implement.

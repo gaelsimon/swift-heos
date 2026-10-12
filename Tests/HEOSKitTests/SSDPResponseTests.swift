@@ -110,6 +110,18 @@ struct MSearchMessageTests {
         let withoutCRLF = SSDPDiscovery.mSearchMessage.replacingOccurrences(of: "\r\n", with: "")
         #expect(!withoutCRLF.contains("\n"), "Message should not contain bare \\n line endings")
     }
+
+    @Test func denonMessageLetsDevicesWaitThreeSeconds() {
+        #expect(SSDPDiscovery.mSearchMessage.contains("MX: 3\r\n"))
+    }
+
+    @Test func mediaServerMessageSearchesMediaServers() {
+        let message = SSDPDiscovery.mSearchMessage(searchTarget: MediaServerDiscovery.searchTarget, maxWait: 1)
+        #expect(message.contains("ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"))
+        #expect(message.contains("MX: 1\r\n"))
+        #expect(!message.contains("ACT-Denon"))
+        #expect(message.hasSuffix("\r\n\r\n"))
+    }
 }
 
 // MARK: - UPnP XML Parsing Tests

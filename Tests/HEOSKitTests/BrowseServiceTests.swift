@@ -40,31 +40,12 @@ struct BrowseServiceTests {
 
     // MARK: - Search Capability
 
-    /// A clock the test moves by hand, so the skip window costs no waiting.
-    private final class TestClock: @unchecked Sendable {
-        private let lock = NSLock()
-        private let base = ContinuousClock.now
-        private var offset: Duration = .zero
-
-        var instant: ContinuousClock.Instant {
-            lock.lock()
-            defer { lock.unlock() }
-            return base.advanced(by: offset)
-        }
-
-        func advance(by amount: Duration) {
-            lock.lock()
-            defer { lock.unlock() }
-            offset += amount
-        }
-    }
-
-    private func makeSetupWithClock() async throws -> (BrowseService, MockTCPTransport, HEOSConnection, TestClock) {
+    private func makeSetupWithClock() async throws -> (BrowseService, MockTCPTransport, HEOSConnection, ManualClock) {
         let transport = MockTCPTransport(autoRespond: true)
         let connection = HEOSConnection(transport: transport)
         try await connection.connect(host: "test", port: 1255)
         try await Task.sleep(for: .milliseconds(50))
-        let clock = TestClock()
+        let clock = ManualClock()
         let service = BrowseService(connection: connection, now: { clock.instant })
         return (service, transport, connection, clock)
     }
@@ -367,6 +348,131 @@ struct BrowseServiceTests {
 
         let sent = await transport.lastSentString()
         #expect(sent?.contains("add_to_queue") == true)
+        await connection.disconnect()
+    }
+
+    // MARK: - Local servers
+
+    private static let serverSID = -1744769114
+
+    /// Each test gets its own server path: the suite runs in parallel and the URL mock is shared.
+    private func makeLocalServerSetup(path: String, locates: CallCounter) async throws -> (BrowseService, MockTCPTransport, HEOSConnection) {
+        let transport = MockTCPTransport(autoRespond: true)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        try await Task.sleep(for: .milliseconds(50))
+        let endpoint = MediaServerEndpoint(
+            friendlyName: "Kantele NAS",
+            serviceType: "urn:schemas-upnp-org:service:ContentDirectory:1",
+            controlURL: URL(string: "http://127.0.0.1:8200\(path)")!
+        )
+        let directory = LocalServerDirectory(
+            locate: {
+                locates.increment()
+                return [endpoint]
+            },
+            makeClient: { UPnPContentDirectoryClient(endpoint: $0, session: URLSession(configuration: MockURLProtocol.makeConfiguration())) },
+            now: { ContinuousClock.now }
+        )
+        let service = BrowseService(connection: connection, now: { ContinuousClock.now }, localServers: directory)
+        return (service, transport, connection)
+    }
+
+    private func enqueueLocalMusic(_ transport: MockTCPTransport) async {
+        await transport.enqueueResponse(makeResponse(
+            command: "browse/browse",
+            message: "sid=1024&returned=1&count=1",
+            payload: """
+            [{"name":"Kantele NAS","image_url":"https://cdn/servers.png","type":"heos_server","sid":\(Self.serverSID)}]
+            """
+        ))
+    }
+
+    @Test func localServerContainersGetTheArtTheDeviceDropped() async throws {
+        let locates = CallCounter()
+        let path = "/browsesvc/artwork/control"
+        let (service, transport, connection) = try await makeLocalServerSetup(path: path, locates: locates)
+        MockURLProtocol.register(pathContaining: path) { _ in
+            (200, """
+            <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:BrowseResponse>
+            <Result>&lt;DIDL-Lite&gt;&lt;container id=&quot;al-1&quot;&gt;&lt;upnp:albumArtURI&gt;http://nas:8200/art/al-1&lt;/upnp:albumArtURI&gt;&lt;/container&gt;&lt;/DIDL-Lite&gt;</Result>
+            </u:BrowseResponse></s:Body></s:Envelope>
+            """)
+        }
+        await enqueueLocalMusic(transport)
+        _ = try await service.browseSource(sid: 1024)
+        await transport.enqueueResponse(makeResponse(
+            command: "browse/browse",
+            message: "sid=\(Self.serverSID)&cid=albums&range=0,0&returned=1&count=11944",
+            payload: """
+            [{"container":"yes","type":"album","cid":"al-1","playable":"yes","name":"Blue Hour","image_url":"","artist":"Someone"}]
+            """
+        ))
+
+        let result = try await service.browseContainer(sid: Self.serverSID, cid: "albums", range: 0...0)
+
+        #expect(result.items.first?.imageURL == "http://nas:8200/art/al-1")
+        #expect(result.count == 11944)
+        #expect(locates.count == 1)
+        await connection.disconnect()
+    }
+
+    @Test func otherSourcesNeverLookForAServer() async throws {
+        let locates = CallCounter()
+        let (service, transport, connection) = try await makeLocalServerSetup(path: "/browsesvc/other/control", locates: locates)
+        await transport.enqueueResponse(makeResponse(
+            command: "browse/browse",
+            message: "sid=3&cid=c1&returned=1&count=1",
+            payload: """
+            [{"container":"yes","type":"container","cid":"c2","name":"Folder","image_url":""}]
+            """
+        ))
+
+        let result = try await service.browseContainer(sid: 3, cid: "c1")
+
+        #expect(result.items.first?.imageURL == "")
+        #expect(locates.count == 0)
+        await connection.disconnect()
+    }
+
+    private func registerSearchCaps(_ caps: String, path: String) {
+        MockURLProtocol.register(pathContaining: path) { _ in
+            (200, "<s:Envelope><s:Body><u:GetSearchCapabilitiesResponse><SearchCaps>\(caps)</SearchCaps></u:GetSearchCapabilitiesResponse></s:Body></s:Envelope>")
+        }
+    }
+
+    @Test func serverThatCannotSearchHasNoCriteria() async throws {
+        let path = "/browsesvc/nosearch/control"
+        let (service, transport, connection) = try await makeLocalServerSetup(path: path, locates: CallCounter())
+        registerSearchCaps("", path: path)
+        await enqueueLocalMusic(transport)
+        _ = try await service.browseSource(sid: 1024)
+
+        let criteria = try await service.getSearchCriteria(sid: Self.serverSID)
+
+        #expect(criteria.isEmpty)
+        let sent = await transport.lastSentString()
+        #expect(sent?.contains("get_search_criteria") == false)
+        await connection.disconnect()
+    }
+
+    @Test func serverThatCanSearchKeepsTheDeviceCriteria() async throws {
+        let path = "/browsesvc/search/control"
+        let (service, transport, connection) = try await makeLocalServerSetup(path: path, locates: CallCounter())
+        registerSearchCaps("dc:title,upnp:artist", path: path)
+        await enqueueLocalMusic(transport)
+        _ = try await service.browseSource(sid: 1024)
+        await transport.enqueueResponse(makeResponse(
+            command: "browse/get_search_criteria",
+            message: "sid=\(Self.serverSID)",
+            payload: """
+            [{"name":"Artist","scid":1,"wildcard":"no"},{"name":"Album","scid":2,"wildcard":"no"}]
+            """
+        ))
+
+        let criteria = try await service.getSearchCriteria(sid: Self.serverSID)
+
+        #expect(criteria.map(\.name) == ["Artist", "Album"])
         await connection.disconnect()
     }
 }
