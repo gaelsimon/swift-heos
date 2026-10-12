@@ -66,6 +66,7 @@ public actor BrowseService {
     private var skipped: [SearchTarget: SkippedTarget] = [:]
     private var reportedTargets: Set<SearchTarget> = []
     private let now: @Sendable () -> ContinuousClock.Instant
+    private let localServers: LocalServerDirectory
 
     /// Errors that mean the source, not the request: the device relaying a server that broke.
     private static let systemErrorID = 12
@@ -81,9 +82,14 @@ public actor BrowseService {
         self.init(connection: connection, now: { ContinuousClock.now })
     }
 
-    init(connection: HEOSConnection, now: @escaping @Sendable () -> ContinuousClock.Instant) {
+    init(
+        connection: HEOSConnection,
+        now: @escaping @Sendable () -> ContinuousClock.Instant,
+        localServers: LocalServerDirectory = LocalServerDirectory()
+    ) {
         self.connection = connection
         self.now = now
+        self.localServers = localServers
     }
 
     public func getMusicSources() async throws -> [MusicSource] {
@@ -96,18 +102,24 @@ public actor BrowseService {
     }
 
     public func browseSource(sid: Int, range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(.browseSource(sid: sid, range: range))
-        return parser.parseBrowseResult(response)
+        let result = try await browse(.browseSource(sid: sid, range: range))
+        await localServers.noteServers(in: result.items)
+        return result
     }
 
+    /// On a local server, the art the device drops from containers is read from the server.
     public func browseContainer(sid: Int, cid: String, range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
+        let result = try await browse(.browseSourceContainer(sid: sid, cid: cid, range: range))
+        await localServers.noteServers(in: result.items)
+        guard await localServers.isLocalServer(sid: sid) else { return result }
+        return await localServers.fillingArtwork(result, sid: sid, cid: cid, start: range?.lowerBound ?? 0)
+    }
+
+    private func browse(_ command: HEOSCommand) async throws -> BrowseResult {
         try await acquireBrowseGate()
         defer { releaseBrowseGate() }
         try Task.checkCancellation()
-        let response = try await connection.send(.browseSourceContainer(sid: sid, cid: cid, range: range))
+        let response = try await connection.send(command)
         return parser.parseBrowseResult(response)
     }
 
@@ -147,7 +159,11 @@ public actor BrowseService {
         )
     }
 
+    /// Empty for a local server with empty SearchCaps, which the device lists criteria for anyway.
     public func getSearchCriteria(sid: Int) async throws -> [SearchCriteria] {
+        if await localServers.isLocalServer(sid: sid), await localServers.searchSupport(sid: sid) == .unsupported {
+            return []
+        }
         try await acquireBrowseGate()
         defer { releaseBrowseGate() }
         try Task.checkCancellation()

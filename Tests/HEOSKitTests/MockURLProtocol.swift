@@ -35,6 +35,12 @@ final class MockURLProtocol: URLProtocol {
         let handler = Self.handler(for: path)
         let (statusCode, body) = handler?(request) ?? (404, "")
 
+        // A negative status is a URLError code: the request fails before any response.
+        if statusCode < 0 {
+            client?.urlProtocol(self, didFailWithError: URLError(URLError.Code(rawValue: statusCode)))
+            return
+        }
+
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: statusCode,

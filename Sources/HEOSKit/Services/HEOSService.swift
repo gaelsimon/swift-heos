@@ -14,6 +14,7 @@ public actor HEOSService {
     var upnpACT: UPnPACTClient?
     var volumeLimitTask: Task<Void, Never>?
     let discovery = DeviceDiscovery()
+    let localServers = LocalServerDirectory()
     var eventRouter: EventRouter?
     var eventTask: Task<Void, Never>?
     var discoveryTask: Task<Void, Never>?
@@ -54,7 +55,7 @@ public actor HEOSService {
         await connectionCoordinator.recordConnection(host: host, port: port, playerID: nil)
         self.playerService = PlayerService(connection: conn)
         self.groupService = GroupService(connection: conn)
-        self.browseService = BrowseService(connection: conn)
+        self.browseService = BrowseService(connection: conn, now: { ContinuousClock.now }, localServers: localServers)
         self.systemService = SystemService(connection: conn)
         self.eventRouter = EventRouter(
             stateUpdater: stateUpdater,

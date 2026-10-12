@@ -7,22 +7,39 @@ import Darwin
 public struct SSDPDiscovery: Sendable {
     private static let multicastAddress = "239.255.255.250"
     private static let multicastPort: UInt16 = 1900
-    private static let searchTarget = "urn:schemas-denon-com:device:ACT-Denon:1"
+    private static let denonSearchTarget = "urn:schemas-denon-com:device:ACT-Denon:1"
 
-    static let mSearchMessage: String = "M-SEARCH * HTTP/1.1\r\n"
-        + "HOST: 239.255.255.250:1900\r\n"
-        + "MAN: \"ssdp:discover\"\r\n"
-        + "MX: 3\r\n"
-        + "ST: urn:schemas-denon-com:device:ACT-Denon:1\r\n"
-        + "\r\n"
+    static let mSearchMessage = mSearchMessage(searchTarget: denonSearchTarget, maxWait: 3)
 
-    public init() {}
+    static func mSearchMessage(searchTarget: String, maxWait: Int) -> String {
+        "M-SEARCH * HTTP/1.1\r\n"
+            + "HOST: 239.255.255.250:1900\r\n"
+            + "MAN: \"ssdp:discover\"\r\n"
+            + "MX: \(maxWait)\r\n"
+            + "ST: \(searchTarget)\r\n"
+            + "\r\n"
+    }
+
+    private let message: String
+    private let gracePeriod: TimeInterval?
+
+    public init() {
+        self.init(searchTarget: Self.denonSearchTarget, maxWait: 3, gracePeriod: 0.5)
+    }
+
+    /// A nil `gracePeriod` waits the whole timeout instead of stopping soon after the first answer.
+    init(searchTarget: String, maxWait: Int, gracePeriod: TimeInterval?) {
+        self.message = Self.mSearchMessage(searchTarget: searchTarget, maxWait: maxWait)
+        self.gracePeriod = gracePeriod
+    }
 
     public func search(timeout: TimeInterval = 5.0) async throws -> [SSDPResponse] {
-        try await withCheckedThrowingContinuation { continuation in
+        let message = message
+        let gracePeriod = gracePeriod
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let responses = try Self.performSearch(timeout: timeout)
+                    let responses = try Self.performSearch(message: message, timeout: timeout, gracePeriod: gracePeriod)
                     continuation.resume(returning: responses)
                 } catch {
                     continuation.resume(throwing: error)
@@ -34,7 +51,6 @@ public struct SSDPDiscovery: Sendable {
     private static let sendCount = 3
     private static let sendIntervalMs: Int32 = 300
     private static let pollIntervalMs: Int32 = 50
-    private static let gracePeriod: TimeInterval = 0.5
 
     /// Creates a UDP multicast socket with address/port reuse and TTL configured,
     /// bound to an ephemeral port on INADDR_ANY.
@@ -84,13 +100,13 @@ public struct SSDPDiscovery: Sendable {
         return fd
     }
 
-    private static func performSearch(timeout: TimeInterval) throws -> [SSDPResponse] {
+    private static func performSearch(message: String, timeout: TimeInterval, gracePeriod: TimeInterval?) throws -> [SSDPResponse] {
         let fd = try createMulticastSocket()
         defer { close(fd) }
 
         var destAddr = prepareMulticastAddress()
 
-        guard let messageData = mSearchMessage.data(using: .utf8) else {
+        guard let messageData = message.data(using: .utf8) else {
             throw SSDPError.socketCreationFailed(errno: 0, detail: "Failed to encode M-SEARCH message")
         }
 
@@ -104,7 +120,7 @@ public struct SSDPDiscovery: Sendable {
         while true {
             let elapsed = Date().timeIntervalSince(startTime)
             if elapsed >= timeout { break }
-            if let firstTime = firstResponseTime,
+            if let firstTime = firstResponseTime, let gracePeriod,
                Date().timeIntervalSince(firstTime) >= gracePeriod { break }
 
             // Send M-SEARCH at scheduled intervals (t=0, t=300ms, t=600ms)
