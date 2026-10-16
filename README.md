@@ -92,9 +92,11 @@ if let pid = state.selectedPlayerID {
 Version 0.x. The protocol layer is stable and well tested. The public API is not settled
 yet:
 
-- `StateUpdater` has around 32 requirements and is shaped by the app it comes from.
-  A lighter entry point is planned.
+- `StateUpdater` is shaped by the app it comes from. A lighter entry point is planned.
 - The `NeosDomain` module name is inherited from Neos and will be renamed before 1.0.
+
+The work left before 1.0 is listed in the
+[Road to 1.0.0](https://github.com/gaelsimon/swift-heos/milestone/1) milestone.
 
 Documentation will come later. For now the tests are a good reference.
 
