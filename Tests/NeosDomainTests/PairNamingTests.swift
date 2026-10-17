@@ -51,6 +51,12 @@ struct PairNamingTests {
         #expect(group.collapsedDisplayName == "Studio")
     }
 
+    @Test func memberNamesContainingAPlusStillReduce() {
+        let group = pair(name: "Deck + Patio Left + Deck + Patio Right", leader: "Deck + Patio Left", member: "Deck + Patio Right")
+
+        #expect(group.collapsedDisplayName == "Deck Patio")
+    }
+
     @Test func roomNameContainingAPlusIsKept() {
         let group = pair(name: "Kitchen + Office", leader: "Kitchen Left", member: "Kitchen Right")
 

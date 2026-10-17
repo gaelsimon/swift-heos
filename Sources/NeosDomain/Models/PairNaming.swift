@@ -23,10 +23,24 @@ public extension SpeakerGroup {
 
     /// HEOS names a group after its members, "Kitchen Left + Kitchen Right"; that is no room name.
     private func isJoinedMemberNames(_ groupName: String) -> Bool {
-        let parts = groupName.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
         let memberNames = players.map { $0.name.trimmingCharacters(in: .whitespaces) }
-        return parts.count > 1 && Set(parts) == Set(memberNames)
+        return memberNames.count > 1 && matches(groupName, joining: memberNames)
     }
+}
+
+/// True when `text` is the names joined by " + " in some order; a name may itself contain a "+".
+private func matches(_ text: String, joining names: [String]) -> Bool {
+    if names.isEmpty { return text.isEmpty }
+    for (index, name) in names.enumerated() {
+        var rest = names
+        rest.remove(at: index)
+        if rest.isEmpty {
+            if text == name { return true }
+        } else if text.hasPrefix(name + " + "), matches(String(text.dropFirst(name.count + 3)), joining: rest) {
+            return true
+        }
+    }
+    return false
 }
 
 /// Leading words every name shares: "Kitchen Left" + "Kitchen Right" → "Kitchen".
