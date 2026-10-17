@@ -294,6 +294,7 @@ extension HEOSService {
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
         Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
+        Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: fetchedGroups ?? [], to: stateUpdater) }
 
         // Phase 2: remaining global state (account check may hit cloud servers)
         let signedInUser = await accountResult
@@ -363,6 +364,7 @@ extension HEOSService {
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
         Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
+        Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: fetchedGroups ?? [], to: stateUpdater) }
 
         let signedInUser = await accountResult
         await stateUpdater.setSignedInUser(signedInUser)

@@ -1,4 +1,5 @@
 import Foundation
+import NeosDomain
 
 public actor GroupService {
     private let connection: HEOSConnection
@@ -6,6 +7,18 @@ public actor GroupService {
 
     public init(connection: HEOSConnection) {
         self.connection = connection
+    }
+
+    /// get_groups carries no levels; without this read a group's slider shows a default until the first event.
+    func pushLevels(of groups: [SpeakerGroup], to stateUpdater: StateUpdater) async {
+        for group in groups {
+            if let level = try? await getGroupVolume(gid: group.gid) {
+                await stateUpdater.setGroupVolume(gid: group.gid, level: level)
+            }
+            if let muted = try? await getGroupMute(gid: group.gid) {
+                await stateUpdater.setGroupMuted(gid: group.gid, muted: muted)
+            }
+        }
     }
 
     public func getGroups() async throws -> [SpeakerGroup] {

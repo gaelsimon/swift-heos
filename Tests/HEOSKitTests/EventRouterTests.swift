@@ -441,6 +441,32 @@ struct EventRouterTests {
         #expect(await recorder.calls == [[]])
     }
 
+    /// get_groups says nothing about levels, so a fresh group's volume and mute are read right after it.
+    @Test @MainActor func groupsChangedReadsTheGroupVolumeAndMute() async throws {
+        let (router, state, transport, _) = try await makeRouterWithGroups()
+        await transport.enqueueResponse(
+            """
+            {"heos":{"command":"group/get_groups","result":"success","message":""},"payload":[{"name":"Den + Bath","gid":7,"players":[{"name":"Den","pid":7,"role":"leader"},{"name":"Bath","pid":8,"role":"member"}]}]}
+            """
+        )
+        await transport.enqueueResponse(
+            """
+            {"heos":{"command":"group/get_volume","result":"success","message":"gid=7&level=33"}}
+            """
+        )
+        await transport.enqueueResponse(
+            """
+            {"heos":{"command":"group/get_mute","result":"success","message":"gid=7&state=on"}}
+            """
+        )
+
+        await router.handle(makeEvent("groups_changed"))
+
+        await waitUntil { await MainActor.run { state.groupMuted[7] != nil } }
+        #expect(state.groupVolumes[7] == 33)
+        #expect(state.groupMuted[7] == true)
+    }
+
     /// A surviving group is no reason to skip the probe: the pair that was broken up may be
     /// one of several, and its ex-follower must still leave the caches.
     @Test @MainActor func groupsChangedWithGroupsStillReclassifiesTheTopology() async throws {

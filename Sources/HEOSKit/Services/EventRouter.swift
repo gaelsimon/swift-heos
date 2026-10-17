@@ -275,6 +275,7 @@ actor EventRouter {
                 // Detached: it reads getPlayers plus one UPnP channel per member, and events are serial.
                 topologyTask?.cancel()
                 topologyTask = Task { [refreshTopology] in await refreshTopology(groups) }
+                Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: groups, to: stateUpdater) }
             case .some(.none):
                 break
             case .none:
