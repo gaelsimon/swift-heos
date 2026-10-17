@@ -50,15 +50,19 @@ actor EventRouter {
     }
 
     /// Device fetches run on their own task: a waking amp takes 20 s, and a newer event replaces the fetch.
+    /// Grouped speakers each send their own copy of an event, so the pid is checked before a copy
+    /// for another member can cancel the selected speaker's fetch.
     func handle(_ event: HEOSEvent) async {
         switch event.eventName {
         case "player_state_changed":        await handlePlayerStateChanged(event)
         case "player_now_playing_changed":
+            guard await isSelectedPlayer(event) else { return }
             nowPlayingTask?.cancel()
             nowPlayingTask = Task { await handleNowPlayingChanged(event) }
         case "player_now_playing_progress": await handleNowPlayingProgress(event)
         case "player_volume_changed":       await handlePlayerVolumeChanged(event)
         case "player_queue_changed":
+            guard await isSelectedPlayer(event) else { return }
             queueTask?.cancel()
             queueTask = Task { await handlePlayerQueueChanged(event) }
         case "player_playback_error":       await handlePlaybackError(event)
@@ -128,7 +132,6 @@ actor EventRouter {
     }
 
     private func handleNowPlayingChanged(_ event: HEOSEvent) async {
-        guard await isSelectedPlayer(event) else { return }
         guard let pidStr = event.message["pid"], let pid = Int(pidStr) else { return }
         for attempt in 0..<3 {
             // A newer event replaced this fetch; its own task carries the fresher state.
@@ -179,7 +182,6 @@ actor EventRouter {
     }
 
     private func handlePlayerQueueChanged(_ event: HEOSEvent) async {
-        guard await isSelectedPlayer(event) else { return }
         guard let pidStr = event.message["pid"], let pid = Int(pidStr) else { return }
         // Queue fetches can be slow when the device is processing browse commands.
         // Retry up to 3 times with increasing back-off so the UI eventually updates.

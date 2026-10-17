@@ -326,6 +326,41 @@ struct EventRouterTests {
         await connection.disconnect()
     }
 
+    // MARK: - Grouped Speakers
+
+    @Test @MainActor func queueChangedForAnotherMemberKeepsTheSelectedFetch() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        let playerService = PlayerService(connection: connection)
+        let state = MockStateUpdater()
+        state.selectedPlayerID = 42
+        let router = EventRouter(
+            stateUpdater: state,
+            playerService: playerService,
+            groupService: nil,
+            browseService: nil
+        )
+        await waitUntil { await transport.isReceiving }
+
+        // A group sends one queue_changed per member within a millisecond; the selected one may come first.
+        await router.handle(makeEvent("player_queue_changed", message: ["pid": "42"]))
+        await waitUntil { await transport.sentData.count == 1 }
+        await router.handle(makeEvent("player_queue_changed", message: ["pid": "99"]))
+        await router.handle(makeEvent("player_now_playing_changed", message: ["pid": "99"]))
+
+        await transport.enqueueResponse("""
+        {"heos":{"command":"player/get_queue","result":"success","message":"pid=42"},\
+        "payload":[{"song":"Song A","album":"Album A","artist":"Artist A","image_url":"","mid":"m1","qid":1,"album_id":""}]}
+        """)
+        await transport.deliverNextResponse()
+
+        await waitUntil { await MainActor.run { !state.queue.isEmpty } }
+        #expect(state.queue.map(\.song) == ["Song A"])
+        #expect(await transport.sentData.count == 1)
+        await connection.disconnect()
+    }
+
     // MARK: - Unknown Event
 
     @Test @MainActor func unknownEventDoesNothing() async {
