@@ -20,7 +20,7 @@ public actor AVRControlClient {
         connection?.state == .ready
     }
 
-    public func connect(host: String, port: Int = 23) async throws {
+    public func connect(host: String, port: Int = 23, timeout: Duration = .seconds(10)) async throws {
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
         let conn = NWConnection(host: nwHost, port: nwPort, using: .tcp)
@@ -29,7 +29,10 @@ public actor AVRControlClient {
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
-                try await Task.sleep(for: .seconds(10))
+                try await Task.sleep(for: timeout)
+                // A refused or silent port leaves the connection in .waiting for good; cancelling it
+                // moves it to .cancelled so the continuation below resumes and the group can finish.
+                conn.cancel()
                 throw TransportError.timeout
             }
             group.addTask {
