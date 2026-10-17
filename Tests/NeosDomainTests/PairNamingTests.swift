@@ -33,8 +33,26 @@ struct PairNamingTests {
         #expect(group.collapsedDisplayName == "Kitchen")
     }
 
-    @Test func multiRoomStyleNameIsKept() {
-        let group = pair(name: "Kitchen + Office", leader: "Kitchen", member: "Office")
+    @Test func groupNamedAfterBothMembersUsesTheSharedRoomName() {
+        let group = pair(name: "Kitchen Left + Kitchen Right", leader: "Kitchen Left", member: "Kitchen Right")
+
+        #expect(group.collapsedDisplayName == "Kitchen")
+    }
+
+    @Test func groupNamedAfterBothMembersInAnyOrderUsesTheSharedRoomName() {
+        let group = pair(name: "Kitchen Right + Kitchen Left", leader: "Kitchen Left", member: "Kitchen Right")
+
+        #expect(group.collapsedDisplayName == "Kitchen")
+    }
+
+    @Test func groupNamedAfterUnrelatedMembersFallsBackToTheLeaderWithoutChannelSuffix() {
+        let group = pair(name: "Studio Left + Bedroom Right", leader: "Studio Left", member: "Bedroom Right")
+
+        #expect(group.collapsedDisplayName == "Studio")
+    }
+
+    @Test func roomNameContainingAPlusIsKept() {
+        let group = pair(name: "Kitchen + Office", leader: "Kitchen Left", member: "Kitchen Right")
 
         #expect(group.collapsedDisplayName == "Kitchen + Office")
     }

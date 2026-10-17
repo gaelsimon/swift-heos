@@ -10,7 +10,7 @@ public extension SpeakerGroup {
     var collapsedDisplayName: String {
         let groupName = name.trimmingCharacters(in: .whitespaces)
         let leaderName = leader?.name.trimmingCharacters(in: .whitespaces) ?? ""
-        guard groupName.isEmpty || groupName == leaderName else { return groupName }
+        guard groupName.isEmpty || groupName == leaderName || isJoinedMemberNames(groupName) else { return groupName }
 
         let shared = sharedLeadingWords(of: players.map(\.name))
         if !shared.isEmpty, shared != leaderName { return shared }
@@ -19,6 +19,13 @@ public extension SpeakerGroup {
         if !stripped.isEmpty { return stripped }
 
         return groupName.isEmpty ? leaderName : groupName
+    }
+
+    /// HEOS names a group after its members, "Kitchen Left + Kitchen Right"; that is no room name.
+    private func isJoinedMemberNames(_ groupName: String) -> Bool {
+        let parts = groupName.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces) }
+        let memberNames = players.map { $0.name.trimmingCharacters(in: .whitespaces) }
+        return parts.count > 1 && Set(parts) == Set(memberNames)
     }
 }
 
