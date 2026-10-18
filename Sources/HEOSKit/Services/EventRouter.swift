@@ -15,9 +15,12 @@ actor EventRouter {
     private let serviceTimeout: Duration
     /// Backstop above the command's own budget, so a device answering "command under process" is never re-asked.
     private let fetchTimeout: Duration
+    /// How long a speaker that left the network on players_changed gets before the second look.
+    private let resettleDelay: Duration
     private var nowPlayingTask: Task<Void, Never>?
     private var queueTask: Task<Void, Never>?
     private var topologyTask: Task<Void, Never>?
+    private var resettleTask: Task<Void, Never>?
 
     init(
         stateUpdater: StateUpdater,
@@ -28,7 +31,8 @@ actor EventRouter {
             // Only the owning session can reclassify; tests that ignore topology need not supply one.
         },
         serviceTimeout: Duration = .seconds(5),
-        fetchTimeout: Duration = .seconds(20)
+        fetchTimeout: Duration = .seconds(20),
+        resettleDelay: Duration = .seconds(5)
     ) {
         self.stateUpdater = stateUpdater
         self.playerService = playerService
@@ -37,6 +41,7 @@ actor EventRouter {
         self.refreshTopology = refreshTopology
         self.serviceTimeout = serviceTimeout
         self.fetchTimeout = fetchTimeout
+        self.resettleDelay = resettleDelay
     }
 
     /// Drops in-flight device fetches, so a torn-down session stops asking a dead connection.
@@ -47,6 +52,8 @@ actor EventRouter {
         queueTask = nil
         topologyTask?.cancel()
         topologyTask = nil
+        resettleTask?.cancel()
+        resettleTask = nil
     }
 
     /// Device fetches run on their own task: a waking amp takes 20 s, and a newer event replaces the fetch.
@@ -243,32 +250,58 @@ actor EventRouter {
         }
     }
 
+    /// A stereo pair breaking up may send only players_changed, before the follower is back on the
+    /// network, and never groups_changed: the groups are re-read with the players, a group whose member
+    /// is no longer listed is dropped, and the whole thing is read once more after the speaker had time
+    /// to settle.
     private func handlePlayersChanged() async {
+        await refreshPlayersAndGroups()
+        resettleTask?.cancel()
+        resettleTask = Task { [resettleDelay] in
+            try? await Task.sleep(for: resettleDelay)
+            guard !Task.isCancelled else { return }
+            await self.refreshPlayersAndGroups()
+        }
+    }
+
+    private func refreshPlayersAndGroups() async {
+        guard let players = await fetchPlayers() else { return }
+        await stateUpdater.setPlayers(players)
+        guard groupService != nil else { return }
+        await handleGroupsChanged(listedPlayers: players)
+    }
+
+    private func fetchPlayers() async -> [Player]? {
         do {
             let result = try await withTimeout("players_changed", operation: { [playerService] in
                 try await playerService?.getPlayers()
             })
             switch result {
             case .some(.some(let players)):
-                await stateUpdater.setPlayers(players)
+                return players
             case .some(.none):
                 // Service was briefly nil; skip update rather than wipe state
-                break
+                return nil
             case .none:
                 await stateUpdater.reportNonFatal(source: "event.players_changed", message: "Timed out fetching players")
+                return nil
             }
         } catch {
             // Transport error; connection lost
+            return nil
         }
     }
 
-    private func handleGroupsChanged() async {
+    /// `listedPlayers`, when given, is the player list just read: a group naming a player that is not in
+    /// it is one the device has not caught up on yet, and is left out.
+    private func handleGroupsChanged(listedPlayers: [Player]? = nil) async {
         do {
             let result = try await withTimeout("groups_changed", operation: { [groupService] in
                 try await groupService?.getGroups()
             })
             switch result {
-            case .some(.some(let groups)):
+            case .some(.some(let fetched)):
+                let groups = fetched.listedIn(listedPlayers)
                 await stateUpdater.setGroups(groups)
                 // A successful fetch is authoritative, empty or not: reclassify so a broken-up pair
                 // stops hiding its ex-follower even when the system still has other groups.
@@ -318,5 +351,14 @@ actor EventRouter {
         HEOSLogger.service.warning("System error for \(command): \(error)")
         await stateUpdater.setError(.deviceError(error))
         await stateUpdater.reportNonFatal(source: "event.system_error", message: "\(command): \(error)")
+    }
+}
+
+private extension Array where Element == SpeakerGroup {
+    /// The groups whose every member is in `players`; all of them when there is no list to check against.
+    func listedIn(_ players: [Player]?) -> [SpeakerGroup] {
+        guard let players else { return self }
+        let listed = Set(players.map(\.pid))
+        return filter { group in group.players.allSatisfy { listed.contains($0.pid) } }
     }
 }
