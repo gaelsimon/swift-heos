@@ -425,6 +425,98 @@ struct EventRouterTests {
         return (router, state, transport, recorder)
     }
 
+    @MainActor
+    private func makeRouterWithPlayersAndGroups(resettleDelay: Duration = .seconds(5)) async throws
+        -> (EventRouter, MockStateUpdater, MockTCPTransport, TopologyRecorder) {
+        let transport = MockTCPTransport(autoRespond: true)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        try await Task.sleep(for: .milliseconds(50))
+        let state = MockStateUpdater()
+        state.selectedPlayerID = 42
+        let recorder = TopologyRecorder()
+        let router = EventRouter(
+            stateUpdater: state,
+            playerService: PlayerService(connection: connection),
+            groupService: GroupService(connection: connection),
+            browseService: nil,
+            refreshTopology: { groups in await recorder.record(groups) },
+            resettleDelay: resettleDelay
+        )
+        return (router, state, transport, recorder)
+    }
+
+    private static let leftAndRight = """
+        {"heos":{"command":"player/get_players","result":"success","message":""},"payload":[{"name":"Salon Left","pid":1,"model":"Denon Home 150","version":"3","ip":"10.0.0.1","network":"wired","lineout":0,"serial":"L"},{"name":"Salon Right","pid":2,"model":"Denon Home 150","version":"3","ip":"10.0.0.2","network":"wired","lineout":0,"serial":"R"}]}
+        """
+    private static let leftAlone = """
+        {"heos":{"command":"player/get_players","result":"success","message":""},"payload":[{"name":"Salon Left","pid":1,"model":"Denon Home 150","version":"3","ip":"10.0.0.1","network":"wired","lineout":0,"serial":"L"}]}
+        """
+    private static let pair = """
+        {"heos":{"command":"group/get_groups","result":"success","message":""},"payload":[{"name":"Salon Left + Salon Right","gid":1,"players":[{"name":"Salon Left","pid":1,"role":"leader"},{"name":"Salon Right","pid":2,"role":"member"}]}]}
+        """
+    private static let noGroups = """
+        {"heos":{"command":"group/get_groups","result":"success","message":""},"payload":[]}
+        """
+
+    /// An unpairing speaker may send players_changed and never groups_changed.
+    @Test @MainActor func playersChangedRereadsTheGroupsToo() async throws {
+        let (router, state, transport, recorder) = try await makeRouterWithPlayersAndGroups()
+        await transport.enqueueResponse(Self.leftAndRight)
+        await transport.enqueueResponse(Self.noGroups)
+
+        await router.handle(makeEvent("players_changed"))
+
+        #expect(state.players.count == 2)
+        #expect(state.groups.isEmpty)
+        await waitUntil { await recorder.calls == [[]] }
+        #expect(await recorder.calls == [[]])
+    }
+
+    /// The device can still list a pair whose follower has already left the network.
+    @Test @MainActor func playersChangedDropsAGroupNamingAnUnlistedPlayer() async throws {
+        let (router, state, transport, _) = try await makeRouterWithPlayersAndGroups()
+        await transport.enqueueResponse(Self.leftAlone)
+        await transport.enqueueResponse(Self.pair)
+
+        await router.handle(makeEvent("players_changed"))
+
+        #expect(state.players.count == 1)
+        #expect(state.groups.isEmpty)
+    }
+
+    /// A follower back from its reboot is relisted after the event, so the lists are read once more later.
+    @Test @MainActor func playersChangedLooksAgainOnceTheSpeakerHasSettled() async throws {
+        let (router, state, transport, _) = try await makeRouterWithPlayersAndGroups(resettleDelay: .milliseconds(100))
+        await transport.enqueueResponse(Self.leftAlone)
+        await transport.enqueueResponse(Self.noGroups)
+        await transport.enqueueResponse(Self.leftAndRight)
+        await transport.enqueueResponse(Self.noGroups)
+
+        await router.handle(makeEvent("players_changed"))
+        #expect(state.players.count == 1)
+
+        await waitUntil { await MainActor.run { state.players.count == 2 } }
+        #expect(state.players.count == 2)
+    }
+
+    @Test @MainActor func playersChangedWithoutAGroupServiceOnlyReadsPlayers() async throws {
+        let transport = MockTCPTransport(autoRespond: true)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        try await Task.sleep(for: .milliseconds(50))
+        let state = MockStateUpdater()
+        let router = EventRouter(
+            stateUpdater: state, playerService: PlayerService(connection: connection), groupService: nil, browseService: nil
+        )
+        await transport.enqueueResponse(Self.leftAndRight)
+
+        await router.handle(makeEvent("players_changed"))
+
+        #expect(state.players.count == 2)
+        #expect(state.calls == ["setPlayers:2"])
+    }
+
     /// Breaking up a pair is the moment the follower must become selectable again.
     @Test @MainActor func groupsChangedWithNoGroupsReclassifiesTheTopology() async throws {
         let (router, state, transport, recorder) = try await makeRouterWithGroups()

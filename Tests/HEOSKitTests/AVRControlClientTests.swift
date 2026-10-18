@@ -47,3 +47,16 @@ struct AVRControlClientTests {
         #expect(AVRControlClient.parseMaxVolume(from: "MVMAX ") == nil)
     }
 }
+
+@Suite("AVRControlClient connect")
+struct AVRControlClientConnectTests {
+    /// Port 1 is privileged and never served here, so the attempt is refused and the connection sits in .waiting.
+    @Test func connectToARefusedPortFailsWithinTheTimeout() async throws {
+        let client = AVRControlClient()
+        let start = ContinuousClock.now
+        await #expect(throws: TransportError.self) {
+            try await client.connect(host: "127.0.0.1", port: 1, timeout: .milliseconds(300))
+        }
+        #expect(ContinuousClock.now - start < .seconds(3))
+    }
+}

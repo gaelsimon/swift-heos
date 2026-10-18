@@ -44,6 +44,9 @@ public protocol QueueService: Sendable {
 /// Multi-room speaker grouping.
 public protocol GroupService: Sendable {
     func getGroups() async throws -> [SpeakerGroup]
+    /// Re-reads the players and the groups from the device into the app state, for a speaker that came back
+    /// or a pair that broke up without the device saying so.
+    func refreshSpeakers() async throws
     func createGroup(leaderPID: Int, memberPIDs: [Int]) async throws
     func ungroup(pid: Int) async throws
     func setGroupVolume(gid: Int, level: Int) async throws
@@ -110,6 +113,12 @@ public protocol AudioService:
     PowerControlService & UPnPTransportService & PlaybackSyncService {}
 
 // MARK: - Default Parameter Overloads
+
+public extension GroupService {
+    func refreshSpeakers() async throws {
+        // Services whose players and groups never change behind the app's back (demo, mocks) have nothing to re-read.
+    }
+}
 
 public extension ConnectionService {
     func connect(host: String, port: Int = 1255, cachedPlayerID: Int? = nil) async throws {
