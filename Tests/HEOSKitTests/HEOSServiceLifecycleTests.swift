@@ -29,6 +29,14 @@ struct HEOSServiceLifecycleTests {
         #expect(state.connectionState == .reconnecting)
     }
 
+    @Test @MainActor func refreshSpeakersWithoutASessionThrows() async {
+        let service = HEOSService(stateUpdater: MockStateUpdater())
+
+        await #expect(throws: HEOSServiceError.self) {
+            try await service.refreshSpeakers()
+        }
+    }
+
     @Test @MainActor func resumeWithoutASessionDoesNothing() async {
         let state = MockStateUpdater()
         let service = HEOSService(stateUpdater: state)

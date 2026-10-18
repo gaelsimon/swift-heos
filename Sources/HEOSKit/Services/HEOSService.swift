@@ -271,6 +271,16 @@ public actor HEOSService {
         try await requireGroupService().createGroup(leaderPID: leaderPID, memberPIDs: memberPIDs)
     }
 
+    public func refreshSpeakers() async throws {
+        try await ensureConnected()
+        let players = try await requirePlayerService().getPlayers()
+        let groups = try await requireGroupService().getGroups()
+        await stateUpdater.setPlayers(players)
+        await stateUpdater.setGroups(groups)
+        Task { await self.refreshGroupTopology(groups: groups, players: players) }
+        Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: groups, to: stateUpdater) }
+    }
+
     public func ungroup(pid: Int) async throws {
         try await ensureConnected()
         try await requireGroupService().ungroup(pid: pid)
