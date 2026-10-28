@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import HEOSKit
+import NeosDomain
 
 @Suite("UPnPGroupControlClient", .serialized)
 struct UPnPGroupControlClientTests {
@@ -78,6 +79,64 @@ struct UPnPGroupControlClientTests {
         MockURLProtocol.register(pathContaining: Self.path) { _ in (404, "") }
         let client = try makeClient()
         await #expect(throws: (any Error).self) { try await client.memberChannel() }
+        await client.invalidateSession()
+    }
+
+    // MARK: - membership
+
+    /// Serves the four-step exchange a pair member answers: UUID, status, channel, friendly name.
+    private func registerPair(status: String, channel: String, name: String?) {
+        MockURLProtocol.register(pathContaining: Self.path) { request in
+            let action = request.value(forHTTPHeaderField: "SOAPACTION") ?? ""
+            if action.contains("GetGroupStatus") {
+                return (200, self.response(action: "GetGroupStatus", body: "<GroupStatus>\(status)</GroupStatus>"))
+            }
+            if action.contains("GetGroupMemberChannel") {
+                return (200, self.response(action: "GetGroupMemberChannel", body: "<AudioChannel>\(channel)</AudioChannel>"))
+            }
+            if action.contains("GetGroupFriendlyName") {
+                guard let name else { return (500, "") }
+                return (200, self.response(action: "GetGroupFriendlyName", body: "<GroupFriendlyName>\(name)</GroupFriendlyName>"))
+            }
+            return (200, self.response(action: "GetGroupUUID", body: "<GroupUUID>uuid-123</GroupUUID>"))
+        }
+    }
+
+    @Test func membershipReadsThePairLeaderWithItsRoomName() async throws {
+        registerPair(status: "LEADER", channel: "LEFT", name: "Kitchen &amp; Den")
+        let client = try makeClient()
+        let membership = try await client.membership()
+        #expect(membership == PairMembership(groupUUID: "uuid-123", role: .leader, channel: "LEFT", name: "Kitchen & Den"))
+        #expect(membership?.roomName == "Kitchen & Den")
+        await client.invalidateSession()
+    }
+
+    @Test func membershipReadsTheFollower() async throws {
+        registerPair(status: "SLAVE", channel: "RIGHT", name: "Kitchen")
+        let client = try makeClient()
+        let membership = try await client.membership()
+        #expect(membership?.role == .follower)
+        #expect(membership?.isChannelSeat == true)
+        await client.invalidateSession()
+    }
+
+    @Test func membershipIsNilOutsideAnyGroup() async throws {
+        MockURLProtocol.register(pathContaining: Self.path) { _ in
+            (200, self.response(action: "GetGroupUUID", body: "<GroupUUID></GroupUUID>"))
+        }
+        let client = try makeClient()
+        let membership = try await client.membership()
+        #expect(membership == nil)
+        await client.invalidateSession()
+    }
+
+    @Test func membershipSurvivesARefusedFriendlyName() async throws {
+        registerPair(status: "NONE", channel: "NORMAL", name: nil)
+        let client = try makeClient()
+        let membership = try await client.membership()
+        #expect(membership?.channel == "NORMAL")
+        #expect(membership?.name == "")
+        #expect(membership?.roomName == nil)
         await client.invalidateSession()
     }
 

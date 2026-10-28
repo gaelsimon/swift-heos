@@ -1,4 +1,5 @@
 import Foundation
+import NeosDomain
 
 /// Reads a device's audio channel (NORMAL vs LEFT/RIGHT/…) via Denon's GroupControl UPnP
 /// service — how we tell a stereo pair from a multi-room group. Endpoint on port 60006.
@@ -38,6 +39,31 @@ public actor UPnPGroupControlClient {
             throw UPnPError.invalidResponse
         }
         return channel
+    }
+
+    /// The device's seat in its stereo or surround group, with the room name; nil when it is in none.
+    public func membership() async throws -> PairMembership? {
+        let uuidXML = try await send("GetGroupUUID")
+        guard let uuid = SOAPEnvelope.extractTag("GroupUUID", from: uuidXML), !uuid.isEmpty else { return nil }
+        let arguments = [("GroupUUID", uuid)]
+        let statusXML = try await send("GetGroupStatus", arguments: arguments)
+        let channelXML = try await send("GetGroupMemberChannel", arguments: arguments)
+        guard let status = SOAPEnvelope.extractTag("GroupStatus", from: statusXML),
+              let channel = SOAPEnvelope.extractTag("AudioChannel", from: channelXML) else {
+            throw UPnPError.invalidResponse
+        }
+        // The name is a nicety: a device that refuses it still classifies.
+        let nameXML = (try? await send("GetGroupFriendlyName", arguments: arguments)) ?? ""
+        let name = SOAPEnvelope.extractTag("GroupFriendlyName", from: nameXML).map(Self.unescaped) ?? ""
+        return PairMembership(groupUUID: uuid, role: .init(groupStatus: status), channel: channel, name: name)
+    }
+
+    private static func unescaped(_ text: String) -> String {
+        text.replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&amp;", with: "&")
     }
 
     private func send(_ action: String, arguments: [(String, String)] = []) async throws -> String {

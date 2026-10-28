@@ -85,6 +85,64 @@ struct HEOSServiceLifecycleTests {
         await service.disconnect()
     }
 
+    // MARK: - Pair seats read over UPnP
+
+    private static func pairReader(_ seats: [String: PairMembership]) -> @Sendable (String) async -> PairMembership? {
+        { host in seats[host] }
+    }
+
+    /// Newer firmware lists a pair as one player and no group: the room name must come from UPnP.
+    @Test @MainActor func aPairTheCLIHidesIsStillNamedFromItsLeader() async {
+        let state = MockStateUpdater()
+        let service = HEOSService(stateUpdater: state)
+        let seat = PairMembership(groupUUID: "g", role: .leader, channel: "LEFT", name: "Kitchen")
+        await service.usePairMembershipReader(Self.pairReader(["192.0.2.48": seat]))
+        let players = [Player(pid: 1, name: "Kitchen Left", ip: "192.0.2.48"), Player(pid: 2, name: "Bedroom", ip: "192.0.2.83")]
+
+        await service.refreshGroupTopology(groups: [], players: players)
+
+        #expect(state.pairMemberships == [1: seat])
+        #expect(state.multiRoomGroupIDs == [])
+    }
+
+    @Test @MainActor func channelsStillClassifyAVisibleGroup() async {
+        let state = MockStateUpdater()
+        let service = HEOSService(stateUpdater: state)
+        await service.usePairMembershipReader(Self.pairReader([
+            "192.0.2.1": PairMembership(groupUUID: "z", role: .leader, channel: "NORMAL", name: ""),
+            "192.0.2.2": PairMembership(groupUUID: "z", role: .follower, channel: "NORMAL", name: "")
+        ]))
+        let group = SpeakerGroup(gid: 1, name: "Den + Bath", players: [
+            GroupPlayer(name: "Den", pid: 1, role: .leader), GroupPlayer(name: "Bath", pid: 2, role: .member)
+        ])
+        let players = [Player(pid: 1, name: "Den", ip: "192.0.2.1"), Player(pid: 2, name: "Bath", ip: "192.0.2.2")]
+
+        await service.refreshGroupTopology(groups: [group], players: players)
+
+        #expect(state.multiRoomGroupIDs == [1])
+        #expect(state.pairMemberships?.count == 2)
+    }
+
+    @Test @MainActor func aDiscoveredDeviceCarriesItsSeat() async throws {
+        let state = MockStateUpdater()
+        let service = HEOSService(stateUpdater: state)
+        let seat = PairMembership(groupUUID: "g", role: .follower, channel: "RIGHT", name: "Kitchen")
+        await service.usePairMembershipReader(Self.pairReader(["192.0.2.50": seat]))
+
+        service.publishDiscovered(DiscoveredDevice(host: "192.0.2.50", friendlyName: "Kitchen Right"))
+
+        await waitUntil { state.discoveredDevices.count == 1 }
+        #expect(state.discoveredDevices.first?.pair == seat)
+    }
+
+    @MainActor
+    private func waitUntil(timeout: Duration = .seconds(5), _ condition: () -> Bool) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline, !condition() {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
     // MARK: - A failed group fetch
 
     /// A getGroups that times out on reconnect used to publish an empty list: the sidebar lost every
