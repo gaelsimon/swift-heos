@@ -61,9 +61,16 @@ final class MockStateUpdater: StateUpdater, @unchecked Sendable {
 
     var multiRoomGroupIDs: Set<Int>?
 
-    func setMultiRoomGroups(_ gids: Set<Int>) {
+    func setMultiRoomGroups(_ gids: Set<Int>, unconfirmed: Set<Int>) {
         calls.append("setMultiRoomGroups:\(gids.count)")
         multiRoomGroupIDs = gids
+    }
+
+    var pairMemberships: [Int: PairMembership]?
+
+    func setPairMemberships(_ memberships: [Int: PairMembership]) {
+        calls.append("setPairMemberships:\(memberships.count)")
+        pairMemberships = memberships
     }
 
     func setMusicSources(_ sources: [MusicSource]) {

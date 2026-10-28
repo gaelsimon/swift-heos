@@ -23,6 +23,37 @@ public actor HEOSService {
     let connectionCoordinator: ConnectionCoordinator
     var isWakingUp = false
 
+    /// Asks a device over UPnP which stereo or surround seat it holds; tests swap in a stub.
+    var pairMembershipReader: @Sendable (String) async -> PairMembership? = { host in
+        guard let client = try? UPnPGroupControlClient(host: host) else { return nil }
+        defer { Task { await client.invalidateSession() } }
+        return try? await client.membership()
+    }
+    var pairLookups: [String: (at: ContinuousClock.Instant, pair: PairMembership?)] = [:]
+
+    func usePairMembershipReader(_ reader: @escaping @Sendable (String) async -> PairMembership?) {
+        pairMembershipReader = reader
+        pairLookups = [:]
+    }
+
+    /// Publishes a discovered device with its pair seat attached, off the discovery stream so a
+    /// slow device holds up nobody else; the seat is re-read once a minute at most.
+    nonisolated func publishDiscovered(_ device: DiscoveredDevice) {
+        Task {
+            let pair = await self.pairMembership(of: device.host)
+            await self.stateUpdater.addDiscoveredDevice(device.withPair(pair))
+        }
+    }
+
+    func pairMembership(of host: String) async -> PairMembership? {
+        if let cached = pairLookups[host], cached.at.duration(to: .now) < .seconds(60) {
+            return cached.pair
+        }
+        let pair = await pairMembershipReader(host)
+        pairLookups[host] = (.now, pair)
+        return pair
+    }
+
     var volumeThrottles: [Int: Throttle<Int>] = [:]
     var groupVolumeThrottles: [Int: Throttle<Int>] = [:]
 
@@ -119,7 +150,7 @@ public actor HEOSService {
 
                         HEOSLogger.discovery.info("NOTIFY received from \(response.host)")
                         let device = await DeviceDiscovery.enrichDevice(from: response)
-                        await self.stateUpdater.addDiscoveredDevice(device)
+                        self.publishDiscovered(device)
                     }
                 }
 
@@ -132,7 +163,7 @@ public actor HEOSService {
                         do {
                             let devices = try await self.discovery.discover(timeout: 5.0)
                             for device in devices {
-                                await self.stateUpdater.addDiscoveredDevice(device)
+                                self.publishDiscovered(device)
                             }
 
                             if !devices.isEmpty {
@@ -155,7 +186,7 @@ public actor HEOSService {
                     let stream = await bonjourDiscovery.startContinuous()
                     for await device in stream {
                         guard !Task.isCancelled else { break }
-                        await self.stateUpdater.addDiscoveredDevice(device)
+                        self.publishDiscovered(device)
                     }
                 }
             }

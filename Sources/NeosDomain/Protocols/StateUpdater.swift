@@ -31,6 +31,8 @@ public protocol StateUpdater: AnyObject, Sendable {
     func setServiceCapabilities(sid: Int, capabilities: ServiceCapabilities)
     func setNowPlayingOptions(_ options: [ServiceOption])
     func setMultiRoomGroups(_ gids: Set<Int>, unconfirmed: Set<Int>)
+    /// Stereo and surround seats by pid, read over UPnP; a pair the CLI hides still shows up here.
+    func setPairMemberships(_ memberships: [Int: PairMembership])
 }
 
 public extension StateUpdater {
@@ -45,6 +47,8 @@ public extension StateUpdater {
     func setServiceCapabilities(sid: Int, capabilities: ServiceCapabilities) {}
     func setNowPlayingOptions(_ options: [ServiceOption]) {}
     func setMultiRoomGroups(_: Set<Int>, unconfirmed _: Set<Int>) {}
+
+    func setPairMemberships(_: [Int: PairMembership]) {}
 
     /// Every group classified: the caller could read all member channels.
     func setMultiRoomGroups(_ gids: Set<Int>) {
@@ -98,4 +102,5 @@ open class MinimalStateUpdater: StateUpdater {
     open func setGroupMuted(gid: Int, muted: Bool) {}
     open func addDiscoveredDevice(_ device: DiscoveredDevice) {}
     open func setPowerState(_ isPoweredOn: Bool) { self.isPoweredOn = isPoweredOn }
+    open func setPairMemberships(_ memberships: [Int: PairMembership]) {}
 }

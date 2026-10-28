@@ -430,44 +430,43 @@ extension HEOSService {
     }
 
     /// Reclassifies after a groups_changed, on freshly read players: a speaker that just left a
-    /// group may have changed address, and an empty list needs no fetch at all.
+    /// group may have changed address.
     func refreshGroupTopology(groups: [SpeakerGroup]) async {
-        guard !groups.isEmpty else {
-            await stateUpdater.setMultiRoomGroups([])
-            return
-        }
         let players = (try? await playerService?.getPlayers()) ?? []
         await refreshGroupTopology(groups: groups, players: players)
     }
 
-    /// Reads each member's UPnP channel to find which groups are plain multi-room, and publishes
-    /// those GIDs. Best-effort: a failed query leaves the group collapsed.
-    /// `groups` is nil when the fetch failed; an empty list is authoritative and clears the pair caches.
+    /// Asks every player over UPnP which seat it holds: the channels tell plain multi-room groups
+    /// from pairs, and a pair the CLI lists as one player still gets its room name. Best-effort: a
+    /// failed query leaves the group collapsed. `groups` is nil when the fetch failed; an empty list
+    /// is authoritative and clears the pair caches.
     func refreshGroupTopology(groups: [SpeakerGroup]?, players: [Player]) async {
         guard let groups else { return }
+        let memberships = await pairMemberships(of: players)
+        await stateUpdater.setPairMemberships(memberships)
         guard !groups.isEmpty else {
             await stateUpdater.setMultiRoomGroups([])
             return
         }
-        let ipByPID = Dictionary(players.map { ($0.pid, $0.ip) }, uniquingKeysWith: { first, _ in first })
-        var channels: [Int: String] = [:]
-        for group in groups {
-            for member in group.players {
-                guard let ip = ipByPID[member.pid], !ip.isEmpty,
-                      let channel = try? await memberAudioChannel(host: ip) else { continue }
-                channels[member.pid] = channel
-            }
-        }
+        let channels = memberships.mapValues(\.channel)
         await stateUpdater.setMultiRoomGroups(
             groups.multiRoomGroupIDs(channelsByPID: channels),
             unconfirmed: groups.unclassifiedGroupIDs(channelsByPID: channels)
         )
     }
 
-    private func memberAudioChannel(host: String) async throws -> String {
-        let client = try UPnPGroupControlClient(host: host)
-        defer { Task { await client.invalidateSession() } } // also invalidate on throw (unreachable host)
-        return try await client.memberChannel()
+    private func pairMemberships(of players: [Player]) async -> [Int: PairMembership] {
+        let reader = pairMembershipReader
+        return await withTaskGroup(of: (Int, PairMembership?).self) { group in
+            for player in players where !player.ip.isEmpty {
+                group.addTask { (player.pid, await reader(player.ip)) }
+            }
+            var memberships: [Int: PairMembership] = [:]
+            for await (pid, membership) in group {
+                if let membership { memberships[pid] = membership }
+            }
+            return memberships
+        }
     }
 
     func startEventListening() {

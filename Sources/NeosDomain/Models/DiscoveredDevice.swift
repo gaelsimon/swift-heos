@@ -11,6 +11,8 @@ public struct DiscoveredDevice: Identifiable, Equatable, Hashable, Sendable, Cod
     public let firmwareVersion: String
     public let deviceID: String
     public let networkID: String
+    /// The stereo or surround seat the device reported over UPnP, when discovery could ask.
+    public let pair: PairMembership?
 
     public var id: String { "\(host):\(port)" }
 
@@ -24,7 +26,8 @@ public struct DiscoveredDevice: Identifiable, Equatable, Hashable, Sendable, Cod
         location: String = "",
         firmwareVersion: String = "",
         deviceID: String = "",
-        networkID: String = ""
+        networkID: String = "",
+        pair: PairMembership? = nil
     ) {
         self.host = host
         self.port = port
@@ -36,5 +39,14 @@ public struct DiscoveredDevice: Identifiable, Equatable, Hashable, Sendable, Cod
         self.firmwareVersion = firmwareVersion
         self.deviceID = deviceID
         self.networkID = networkID
+        self.pair = pair
+    }
+
+    public func withPair(_ pair: PairMembership?) -> DiscoveredDevice {
+        DiscoveredDevice(
+            host: host, port: port, friendlyName: friendlyName, modelName: modelName,
+            modelNumber: modelNumber, serialNumber: serialNumber, location: location,
+            firmwareVersion: firmwareVersion, deviceID: deviceID, networkID: networkID, pair: pair
+        )
     }
 }
