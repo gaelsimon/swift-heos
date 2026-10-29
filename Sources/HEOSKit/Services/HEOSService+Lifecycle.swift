@@ -453,6 +453,27 @@ extension HEOSService {
             groups.multiRoomGroupIDs(channelsByPID: channels),
             unconfirmed: groups.unclassifiedGroupIDs(channelsByPID: channels)
         )
+        await stateUpdater.setZoneNames(zoneNames(of: groups, players: players))
+    }
+
+    /// Asks each group's leader what its zone is called; a device that answers nothing names nothing.
+    func zoneNames(of groups: [SpeakerGroup], players: [Player]) async -> [Int: String] {
+        let reader = zoneNameReader
+        let leaders = groups.compactMap { group -> (Int, String)? in
+            guard let pid = group.leader?.pid,
+                  let host = players.first(where: { $0.pid == pid })?.ip, !host.isEmpty else { return nil }
+            return (group.gid, host)
+        }
+        return await withTaskGroup(of: (Int, String?).self) { tasks in
+            for (gid, host) in leaders {
+                tasks.addTask { (gid, await reader(host)) }
+            }
+            var names: [Int: String] = [:]
+            for await (gid, name) in tasks {
+                if let name, !name.isEmpty { names[gid] = name }
+            }
+            return names
+        }
     }
 
     private func pairMemberships(of players: [Player]) async -> [Int: PairMembership] {

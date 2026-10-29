@@ -66,6 +66,13 @@ final class MockStateUpdater: StateUpdater, @unchecked Sendable {
         multiRoomGroupIDs = gids
     }
 
+    var zoneNames: [Int: String]?
+
+    func setZoneNames(_ names: [Int: String]) {
+        calls.append("setZoneNames:\(names.count)")
+        zoneNames = names
+    }
+
     var pairMemberships: [Int: PairMembership]?
 
     func setPairMemberships(_ memberships: [Int: PairMembership]) {

@@ -49,6 +49,8 @@ public protocol GroupService: Sendable {
     func refreshSpeakers() async throws
     func createGroup(leaderPID: Int, memberPIDs: [Int]) async throws
     func ungroup(pid: Int) async throws
+    /// Names the group on the devices themselves, where other HEOS clients can see it.
+    func renameGroup(gid: Int, name: String) async throws
     func setGroupVolume(gid: Int, level: Int) async throws
     func toggleGroupMute(gid: Int) async throws
 }
@@ -117,6 +119,10 @@ public protocol AudioService:
 public extension GroupService {
     func refreshSpeakers() async throws {
         // Services whose players and groups never change behind the app's back (demo, mocks) have nothing to re-read.
+    }
+
+    func renameGroup(gid: Int, name: String) async throws {
+        // Services without devices to hold the name (demo, mocks) keep it app-side only.
     }
 }
 
