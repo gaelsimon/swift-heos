@@ -21,6 +21,11 @@ public extension SpeakerGroup {
         return groupName.isEmpty ? leaderName : groupName
     }
 
+    /// True for the name HEOS gives a group by default, its members joined by " + ".
+    var isNamedAfterMembers: Bool {
+        isJoinedMemberNames(name.trimmingCharacters(in: .whitespaces))
+    }
+
     /// HEOS names a group after its members, "Kitchen Left + Kitchen Right"; that is no room name.
     private func isJoinedMemberNames(_ groupName: String) -> Bool {
         let memberNames = players.map { $0.name.trimmingCharacters(in: .whitespaces) }

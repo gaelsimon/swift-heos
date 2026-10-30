@@ -33,6 +33,9 @@ public protocol StateUpdater: AnyObject, Sendable {
     func setMultiRoomGroups(_ gids: Set<Int>, unconfirmed: Set<Int>)
     /// Stereo and surround seats by pid, read over UPnP; a pair the CLI hides still shows up here.
     func setPairMemberships(_ memberships: [Int: PairMembership])
+    /// Names the devices hold for their multi-room zones, by gid, read over UPnP; the HEOS app's
+    /// presets set them and the CLI never shows them.
+    func setZoneNames(_ names: [Int: String])
 }
 
 public extension StateUpdater {
@@ -49,6 +52,7 @@ public extension StateUpdater {
     func setMultiRoomGroups(_: Set<Int>, unconfirmed _: Set<Int>) {}
 
     func setPairMemberships(_: [Int: PairMembership]) {}
+    func setZoneNames(_: [Int: String]) {}
 
     /// Every group classified: the caller could read all member channels.
     func setMultiRoomGroups(_ gids: Set<Int>) {

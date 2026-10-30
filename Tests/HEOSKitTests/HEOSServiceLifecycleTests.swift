@@ -112,6 +112,7 @@ struct HEOSServiceLifecycleTests {
             "192.0.2.1": PairMembership(groupUUID: "z", role: .leader, channel: "NORMAL", name: ""),
             "192.0.2.2": PairMembership(groupUUID: "z", role: .follower, channel: "NORMAL", name: "")
         ]))
+        await service.useZoneNameReader { _ in nil }
         let group = SpeakerGroup(gid: 1, name: "Den + Bath", players: [
             GroupPlayer(name: "Den", pid: 1, role: .leader), GroupPlayer(name: "Bath", pid: 2, role: .member)
         ])
@@ -121,6 +122,23 @@ struct HEOSServiceLifecycleTests {
 
         #expect(state.multiRoomGroupIDs == [1])
         #expect(state.pairMemberships?.count == 2)
+    }
+
+    @Test @MainActor func zoneNamesComeFromEachGroupLeader() async {
+        let state = MockStateUpdater()
+        let service = HEOSService(stateUpdater: state)
+        await service.usePairMembershipReader(Self.pairReader([:]))
+        await service.useZoneNameReader { host in ["192.0.2.1": "All Rooms", "192.0.2.2": ""][host] }
+        let groups = [
+            SpeakerGroup(gid: 1, name: "Den + Bath", players: [GroupPlayer(name: "Den", pid: 1, role: .leader)]),
+            SpeakerGroup(gid: 2, name: "Loft + Hall", players: [GroupPlayer(name: "Loft", pid: 2, role: .leader)]),
+            SpeakerGroup(gid: 3, name: "Shed", players: [GroupPlayer(name: "Shed", pid: 3, role: .leader)])
+        ]
+        let players = [Player(pid: 1, name: "Den", ip: "192.0.2.1"), Player(pid: 2, name: "Loft", ip: "192.0.2.2"), Player(pid: 3, name: "Shed", ip: "")]
+
+        await service.refreshGroupTopology(groups: groups, players: players)
+
+        #expect(state.zoneNames == [1: "All Rooms"])
     }
 
     @Test @MainActor func aDiscoveredDeviceCarriesItsSeat() async throws {

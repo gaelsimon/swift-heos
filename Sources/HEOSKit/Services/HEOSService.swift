@@ -36,6 +36,27 @@ public actor HEOSService {
         pairLookups = [:]
     }
 
+    /// Reads the name a zone leader holds for its multi-room zone; tests swap in a stub.
+    var zoneNameReader: @Sendable (String) async -> String? = { host in
+        guard let client = try? UPnPZoneControlClient(host: host) else { return nil }
+        defer { Task { await client.invalidateSession() } }
+        return try? await client.zoneName()
+    }
+
+    var zoneNameWriter: @Sendable (String, String) async throws -> Void = { host, name in
+        let client = try UPnPZoneControlClient(host: host)
+        defer { Task { await client.invalidateSession() } }
+        try await client.setZoneName(name)
+    }
+
+    func useZoneNameReader(_ reader: @escaping @Sendable (String) async -> String?) {
+        zoneNameReader = reader
+    }
+
+    func useZoneNameWriter(_ writer: @escaping @Sendable (String, String) async throws -> Void) {
+        zoneNameWriter = writer
+    }
+
     /// Publishes a discovered device with its pair seat attached, off the discovery stream so a
     /// slow device holds up nobody else; the seat is re-read once a minute at most.
     nonisolated func publishDiscovered(_ device: DiscoveredDevice) {
@@ -317,6 +338,19 @@ public actor HEOSService {
         try await requireGroupService().ungroup(pid: pid)
     }
 
+    /// Writes the name to the zone leader over UPnP, then publishes what the devices now report.
+    public func renameGroup(gid: Int, name: String) async throws {
+        try await ensureConnected()
+        let players = try await requirePlayerService().getPlayers()
+        let groups = try await requireGroupService().getGroups()
+        guard let leaderPID = groups.first(where: { $0.gid == gid })?.leader?.pid,
+              let host = players.first(where: { $0.pid == leaderPID })?.ip, !host.isEmpty else {
+            throw HEOSServiceError.noGroupLeader(gid: gid)
+        }
+        try await zoneNameWriter(host, name)
+        await stateUpdater.setZoneNames(zoneNames(of: groups, players: players))
+    }
+
     public func setGroupVolume(gid: Int, level: Int) async throws {
         try await ensureConnected()
         await groupVolumeThrottle(for: gid).submit(level)
@@ -503,10 +537,12 @@ public actor HEOSService {
 
 public enum HEOSServiceError: Error, Sendable, LocalizedError {
     case notConnected
+    case noGroupLeader(gid: Int)
 
     public var errorDescription: String? {
         switch self {
         case .notConnected: "Not connected to speaker"
+        case .noGroupLeader(let gid): "Group \(gid) has no reachable leader"
         }
     }
 }
