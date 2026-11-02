@@ -4,19 +4,21 @@ import os
 
 // MARK: - Player Selection
 
-/// Picks the default player: cached choice if still present, else a standalone speaker
-/// over an AVR zone. Grouped members collapse to their leader so a pair is never picked.
-func preferredPlayer(from players: [Player], groups: [SpeakerGroup], cachedPID: Int?) -> Player? {
+/// Picks the default player: cached choice if still present, else the player at the address
+/// connected to, else a standalone speaker over an AVR zone. Grouped members collapse to their
+/// leader so a pair is never picked.
+func preferredPlayer(from players: [Player], groups: [SpeakerGroup], cachedPID: Int?, host: String? = nil) -> Player? {
     guard !players.isEmpty else { return nil }
 
     // Never default to a stereo pair/group member; pick from the collapsed (leader) list.
     let collapsed = players.collapsingGroups(groups)
     let pool = collapsed.isEmpty ? players : collapsed
 
-    if let cachedPID {
-        let resolvedPID = groups.leaderPID(for: cachedPID)
-        if let cached = pool.first(where: { $0.pid == resolvedPID }) {
-            return cached
+    let wantedPID = cachedPID ?? players.first(where: { !$0.ip.isEmpty && $0.ip == host })?.pid
+    if let wantedPID {
+        let resolvedPID = groups.leaderPID(for: wantedPID)
+        if let wanted = pool.first(where: { $0.pid == resolvedPID }) {
+            return wanted
         }
     }
 
@@ -301,8 +303,8 @@ extension HEOSService {
         await stateUpdater.setSignedInUser(signedInUser)
         if sources == nil { await retryMusicSources() }
 
-        // Determine the correct PID; prefer cached if it still exists, then standalone speakers
-        guard let preferred = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: cachedPID) else {
+        let host = await connectionCoordinator.lastHost
+        guard let preferred = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: cachedPID, host: host) else {
             HEOSLogger.service.warning("getPlayers returned empty during parallel load; skipping player state")
             return
         }
@@ -370,7 +372,8 @@ extension HEOSService {
         await stateUpdater.setSignedInUser(signedInUser)
         if sources == nil { await retryMusicSources() }
 
-        if let player = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: nil) {
+        let host = await connectionCoordinator.lastHost
+        if let player = preferredPlayer(from: players, groups: fetchedGroups ?? [], cachedPID: nil, host: host) {
             await connectionCoordinator.updateLastPlayerID(player.pid)
             await stateUpdater.setSelectedPlayerID(player.pid)
             await loadPlayerState(pid: player.pid)
