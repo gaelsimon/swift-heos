@@ -1,8 +1,8 @@
 import Foundation
 import NeosDomain
 
-/// Reads a device's audio channel (NORMAL vs LEFT/RIGHT/…) via Denon's GroupControl UPnP
-/// service — how we tell a stereo pair from a multi-room group. Endpoint on port 60006.
+/// Reads a device's seat in its stereo or surround group via Denon's GroupControl UPnP service,
+/// how a pair is told from a multi-room group. Endpoint on port 60006.
 public actor UPnPGroupControlClient {
     private let session: URLSession
     private let baseURL: URL
@@ -30,10 +30,7 @@ public actor UPnPGroupControlClient {
 
     /// This device's audio channel within its current group (e.g. NORMAL, LEFT, RIGHT).
     public func memberChannel() async throws -> String {
-        let uuidXML = try await send("GetGroupUUID")
-        guard let uuid = SOAPEnvelope.extractTag("GroupUUID", from: uuidXML), !uuid.isEmpty else {
-            throw UPnPError.invalidResponse
-        }
+        guard let uuid = try await groupUUID() else { throw UPnPError.invalidResponse }
         let channelXML = try await send("GetGroupMemberChannel", arguments: [("GroupUUID", uuid)])
         guard let channel = SOAPEnvelope.extractTag("AudioChannel", from: channelXML) else {
             throw UPnPError.invalidResponse
@@ -42,9 +39,21 @@ public actor UPnPGroupControlClient {
     }
 
     /// The device's seat in its stereo or surround group, with the room name; nil when it is in none.
+    /// The evented state is read first: some firmware answers the per-field actions with nothing.
     public func membership() async throws -> PairMembership? {
-        let uuidXML = try await send("GetGroupUUID")
-        guard let uuid = SOAPEnvelope.extractTag("GroupUUID", from: uuidXML), !uuid.isEmpty else { return nil }
+        let state = await eventedState()
+        if let uuid = state["GroupUUID"] {
+            if Self.isNoGroup(uuid) { return nil }
+            if let status = state["GroupStatus"], let channel = state["AudioChannel"] {
+                return PairMembership(groupUUID: uuid, role: .init(groupStatus: status),
+                                      channel: channel, name: state["GroupFriendlyName"] ?? "")
+            }
+        }
+        return try await membershipFromActions()
+    }
+
+    private func membershipFromActions() async throws -> PairMembership? {
+        guard let uuid = try await groupUUID() else { return nil }
         let arguments = [("GroupUUID", uuid)]
         let statusXML = try await send("GetGroupStatus", arguments: arguments)
         let channelXML = try await send("GetGroupMemberChannel", arguments: arguments)
@@ -54,16 +63,40 @@ public actor UPnPGroupControlClient {
         }
         // The name is a nicety: a device that refuses it still classifies.
         let nameXML = (try? await send("GetGroupFriendlyName", arguments: arguments)) ?? ""
-        let name = SOAPEnvelope.extractTag("GroupFriendlyName", from: nameXML).map(Self.unescaped) ?? ""
+        let name = SOAPEnvelope.extractTag("GroupFriendlyName", from: nameXML)
+            .map(SOAPEnvelope.unescapeXMLEntities) ?? ""
         return PairMembership(groupUUID: uuid, role: .init(groupStatus: status), channel: channel, name: name)
     }
 
-    private static func unescaped(_ text: String) -> String {
-        text.replacingOccurrences(of: "&lt;", with: "<")
-            .replacingOccurrences(of: "&gt;", with: ">")
-            .replacingOccurrences(of: "&quot;", with: "\"")
-            .replacingOccurrences(of: "&apos;", with: "'")
-            .replacingOccurrences(of: "&amp;", with: "&")
+    /// The GroupControl variables the device last evented; empty when it answers none.
+    private func eventedState() async -> [String: String] {
+        guard let xml = try? await send("GetCurrentState"),
+              let event = SOAPEnvelope.extractTag("CurrentState", from: xml) else { return [:] }
+        return Self.eventValues(in: SOAPEnvelope.unescapeXMLEntities(event))
+    }
+
+    /// The `<Name val="…"/>` pairs of a LastChange event, values unescaped; empty values are dropped.
+    static func eventValues(in event: String) -> [String: String] {
+        guard let regex = try? NSRegularExpression(pattern: #"<(\w+) val="([^"]*)"/>"#) else { return [:] }
+        var values: [String: String] = [:]
+        for match in regex.matches(in: event, range: NSRange(event.startIndex..., in: event)) {
+            guard let nameRange = Range(match.range(at: 1), in: event),
+                  let valueRange = Range(match.range(at: 2), in: event) else { continue }
+            let value = SOAPEnvelope.unescapeXMLEntities(String(event[valueRange]))
+            if !value.isEmpty { values[String(event[nameRange])] = value }
+        }
+        return values
+    }
+
+    private func groupUUID() async throws -> String? {
+        let xml = try await send("GetGroupUUID")
+        guard let uuid = SOAPEnvelope.extractTag("GroupUUID", from: xml), !Self.isNoGroup(uuid) else { return nil }
+        return uuid
+    }
+
+    // An ungrouped device answers a UUID of zeros, with or without dashes.
+    private static func isNoGroup(_ uuid: String) -> Bool {
+        uuid.allSatisfy { $0 == "0" || $0 == "-" }
     }
 
     private func send(_ action: String, arguments: [(String, String)] = []) async throws -> String {
