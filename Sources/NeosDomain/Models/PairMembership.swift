@@ -5,10 +5,11 @@ public struct PairMembership: Sendable, Equatable, Hashable, Codable {
     public enum Role: String, Sendable, Codable {
         case leader, follower, none
 
+        // The actions say LEADER/SLAVE, the evented state GROUP_LEAD/GROUP_SLAVE.
         public init(groupStatus: String) {
             switch groupStatus.uppercased() {
-            case "LEADER": self = .leader
-            case "SLAVE": self = .follower
+            case "LEADER", "GROUP_LEAD": self = .leader
+            case "SLAVE", "GROUP_SLAVE": self = .follower
             default: self = .none
             }
         }
