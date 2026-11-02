@@ -94,6 +94,36 @@ struct PreferredPlayerTests {
         ])
     }
 
+    // MARK: - The address connected to
+
+    @Test func picksThePlayerAtTheAddressConnectedTo() {
+        let bedroom = Player(pid: 1, name: "Bedroom", ip: "192.0.2.1", lineout: 0)
+        let study = Player(pid: 2, name: "Study", ip: "192.0.2.2", lineout: 0)
+        let result = preferredPlayer(from: [bedroom, study], groups: [], cachedPID: nil, host: "192.0.2.2")
+        #expect(result?.pid == 2)
+    }
+
+    @Test func anAddressNobodyHasFallsBackToAStandaloneSpeaker() {
+        let zone2 = Player(pid: 1, name: "Denon Zone 2", ip: "192.0.2.1", lineout: 2, control: 3)
+        let study = Player(pid: 2, name: "Study", ip: "192.0.2.2", lineout: 0)
+        let result = preferredPlayer(from: [zone2, study], groups: [], cachedPID: nil, host: "192.0.2.9")
+        #expect(result?.pid == 2)
+    }
+
+    @Test func aFollowerAddressResolvesToItsLeader() {
+        let leader = Player(pid: 100, name: "Kitchen Left", ip: "192.0.2.48", lineout: 0)
+        let member = Player(pid: 101, name: "Kitchen Right", ip: "192.0.2.50", lineout: 0)
+        let result = preferredPlayer(from: [leader, member], groups: [stereoPair()], cachedPID: nil, host: "192.0.2.50")
+        #expect(result?.pid == 100)
+    }
+
+    @Test func theCachedChoiceWinsOverTheAddress() {
+        let bedroom = Player(pid: 1, name: "Bedroom", ip: "192.0.2.1", lineout: 0)
+        let study = Player(pid: 2, name: "Study", ip: "192.0.2.2", lineout: 0)
+        let result = preferredPlayer(from: [bedroom, study], groups: [], cachedPID: 1, host: "192.0.2.2")
+        #expect(result?.pid == 1)
+    }
+
     @Test func neverPicksAGroupMemberAsDefault() {
         // Member (pid 101) sorts first, but the leader must be chosen.
         let member = Player(pid: 101, name: "Kitchen Right", lineout: 0)
