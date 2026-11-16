@@ -7,6 +7,7 @@ public actor HEOSService {
     var playerService: PlayerService?
     var groupService: GroupService?
     var browseService: BrowseService?
+    var searchChannel: SearchChannel?
     var systemService: SystemService?
     var avrClient: AVRControlClient?
     var avrEventTask: Task<Void, Never>?
@@ -97,6 +98,8 @@ public actor HEOSService {
         avrEventTask = nil
         await connection?.disconnect()
         connection = nil
+        await searchChannel?.close()
+        searchChannel = nil
 
         // Plain TCP on the given port (1255 for HEOS CLI)
         let transport = TCPTransport()
@@ -104,10 +107,14 @@ public actor HEOSService {
         try await conn.connect(host: host, port: port)
 
         self.connection = conn
+        let channel = SearchChannel(host: host, port: port, makeTransport: { TCPTransport() })
+        self.searchChannel = channel
         await connectionCoordinator.recordConnection(host: host, port: port, playerID: nil)
         self.playerService = PlayerService(connection: conn)
         self.groupService = GroupService(connection: conn)
-        self.browseService = BrowseService(connection: conn, now: { ContinuousClock.now }, localServers: localServers)
+        self.browseService = BrowseService(
+            connection: conn, now: { ContinuousClock.now }, localServers: localServers, searchChannel: channel
+        )
         self.systemService = SystemService(connection: conn)
         self.eventRouter = EventRouter(
             stateUpdater: stateUpdater,

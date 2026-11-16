@@ -5,47 +5,13 @@ public actor BrowseService {
     private let connection: HEOSConnection
     private let parser = HEOSResponseParser()
 
-    // MARK: - Browse Serialization
+    /// One browse command at a time on the main connection.
+    private let browseGate = RequestGate(limit: 1)
+    private let searchChannel: SearchChannel?
 
-    /// The HEOS device processes browse commands one at a time. Sending multiple
-    /// concurrently causes "command under process" responses and eventual timeouts.
-    /// This gate ensures only one browse command is in-flight at a time.
-    private struct QueuedWaiter {
-        let id: UUID
-        let continuation: CheckedContinuation<Void, Error>
-    }
-    private var browseQueue: [QueuedWaiter] = []
-    private var isBrowsing = false
-
-    private func acquireBrowseGate() async throws {
-        if !isBrowsing {
-            isBrowsing = true
-            return
-        }
-        let id = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                browseQueue.append(QueuedWaiter(id: id, continuation: continuation))
-            }
-        } onCancel: {
-            Task { await self.cancelWaiter(id: id) }
-        }
-        isBrowsing = true
-    }
-
-    private func cancelWaiter(id: UUID) {
-        guard let index = browseQueue.firstIndex(where: { $0.id == id }) else { return }
-        let waiter = browseQueue.remove(at: index)
-        waiter.continuation.resume(throwing: CancellationError())
-    }
-
-    private func releaseBrowseGate() {
-        if let next = browseQueue.first {
-            browseQueue.removeFirst()
-            next.continuation.resume()
-        } else {
-            isBrowsing = false
-        }
+    private func gated(_ command: HEOSCommand) async throws -> HEOSResponse {
+        let connection = connection
+        return try await browseGate.run { try await connection.send(command) }
     }
 
     // MARK: - Search Capability
@@ -85,11 +51,13 @@ public actor BrowseService {
     init(
         connection: HEOSConnection,
         now: @escaping @Sendable () -> ContinuousClock.Instant,
-        localServers: LocalServerDirectory = LocalServerDirectory()
+        localServers: LocalServerDirectory = LocalServerDirectory(),
+        searchChannel: SearchChannel? = nil
     ) {
         self.connection = connection
         self.now = now
         self.localServers = localServers
+        self.searchChannel = searchChannel
     }
 
     public func getMusicSources() async throws -> [MusicSource] {
@@ -116,11 +84,7 @@ public actor BrowseService {
     }
 
     private func browse(_ command: HEOSCommand) async throws -> BrowseResult {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(command)
-        return parser.parseBrowseResult(response)
+        parser.parseBrowseResult(try await gated(command))
     }
 
     /// Raises the recorded error without asking again while a target is inside its skip window.
@@ -132,17 +96,26 @@ public actor BrowseService {
             skipped[target] = nil
             searchFailures[target] = nil
         }
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
         do {
-            let response = try await connection.send(.search(sid: sid, searchString: query, searchCriteriaID: criteriaID, range: range))
+            let response = try await sendSearch(.search(sid: sid, searchString: query, searchCriteriaID: criteriaID, range: range))
             searchFailures[target] = nil
             return parser.parseBrowseResult(response)
         } catch let error as HEOSError where error.errorID == Self.systemErrorID {
             noteSearchFailure(target, error)
             throw error
         }
+    }
+
+    /// The search connection when it can be had, else the main one behind the browse gate.
+    private func sendSearch(_ command: HEOSCommand) async throws -> HEOSResponse {
+        if let searchChannel {
+            do {
+                return try await searchChannel.send(command)
+            } catch SearchChannel.Failure.unavailable {
+                // Falls through to the main connection.
+            }
+        }
+        return try await gated(command)
     }
 
     /// Leaves a target alone for the skip window once it has failed enough, and reports it once.
@@ -164,10 +137,7 @@ public actor BrowseService {
         if await localServers.isLocalServer(sid: sid), await localServers.searchSupport(sid: sid) == .unsupported {
             return []
         }
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(.getSearchCriteria(sid: sid))
+        let response = try await gated(.getSearchCriteria(sid: sid))
         return parser.parseSearchCriteria(response)
     }
 
@@ -198,18 +168,12 @@ public actor BrowseService {
     }
 
     public func getFavorites(range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(.browseSource(sid: 1028, range: range))
+        let response = try await gated(.browseSource(sid: 1028, range: range))
         return parser.parseBrowseResult(response)
     }
 
     public func getPlaylists(range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(.browseSource(sid: 1025, range: range))
+        let response = try await gated(.browseSource(sid: 1025, range: range))
         return parser.parseBrowseResult(response)
     }
 
@@ -218,38 +182,23 @@ public actor BrowseService {
     }
 
     public func getHistory(range: ClosedRange<Int>? = nil) async throws -> BrowseResult {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        let response = try await connection.send(.browseSource(sid: 1026, range: range))
+        let response = try await gated(.browseSource(sid: 1026, range: range))
         return parser.parseBrowseResult(response)
     }
 
     public func renamePlaylist(sid: Int, cid: String, name: String) async throws {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        try await connection.send(.renamePlaylist(sid: sid, cid: cid, name: name))
+        try await gated(.renamePlaylist(sid: sid, cid: cid, name: name))
     }
 
     public func deletePlaylist(sid: Int, cid: String) async throws {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        try await connection.send(.deletePlaylist(sid: sid, cid: cid))
+        try await gated(.deletePlaylist(sid: sid, cid: cid))
     }
 
     public func retrieveMetadata(sid: Int, cid: String) async throws -> HEOSResponse {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        return try await connection.send(.retrieveMetadata(sid: sid, cid: cid))
+        return try await gated(.retrieveMetadata(sid: sid, cid: cid))
     }
 
     public func setServiceOption(sid: Int, option: Int, params: [String: String] = [:]) async throws {
-        try await acquireBrowseGate()
-        defer { releaseBrowseGate() }
-        try Task.checkCancellation()
-        try await connection.send(.setServiceOption(sid: sid, option: option, params: params))
+        try await gated(.setServiceOption(sid: sid, option: option, params: params))
     }
 }

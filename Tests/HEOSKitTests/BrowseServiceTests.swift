@@ -38,6 +38,67 @@ struct BrowseServiceTests {
         _ = try? await service.search(sid: sid, query: query, criteriaID: scid)
     }
 
+    // MARK: - Search Connection
+
+    private func makeSetupWithChannel(
+        _ maker: SearchChannelTests.TransportMaker
+    ) async throws -> (BrowseService, MockTCPTransport, SearchChannel) {
+        let transport = MockTCPTransport(autoRespond: true)
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        try await Task.sleep(for: .milliseconds(50))
+        let channel = SearchChannel(host: "test", port: 1255, makeTransport: { maker.make() })
+        let service = BrowseService(connection: connection, now: { ContinuousClock.now }, searchChannel: channel)
+        return (service, transport, channel)
+    }
+
+    private func searchAnswer(sid: Int, scid: Int, query: String) -> String {
+        makeResponse(command: "browse/search", message: "sid=\(sid)&search=\(query)&scid=\(scid)&returned=1&count=1",
+                     payload: #"[{"container":"no","playable":"yes","type":"song","name":"Song","mid":"m1"}]"#)
+    }
+
+    @Test func searchesGoOverTheirOwnConnection() async throws {
+        let maker = SearchChannelTests.TransportMaker()
+        let (service, main, channel) = try await makeSetupWithChannel(maker)
+
+        let search = Task { try await service.search(sid: 10, query: "x", criteriaID: 3) }
+        try await Task.sleep(for: .milliseconds(80))
+        let searchTransport = try #require(maker.transports.first)
+        await searchTransport.simulateEvent(searchAnswer(sid: 10, scid: 3, query: "x"))
+
+        let result = try await search.value
+        #expect(result.items.count == 1)
+        #expect(await main.sentData.isEmpty)
+        #expect(await searchTransport.lastSentString()?.contains("browse/search") == true)
+        await channel.close()
+    }
+
+    @Test func searchesUseTheMainConnectionWhenTheirOwnCannotOpen() async throws {
+        let maker = SearchChannelTests.TransportMaker(connectError: TransportError.timeout)
+        let (service, main, channel) = try await makeSetupWithChannel(maker)
+        await main.enqueueResponse(searchAnswer(sid: 10, scid: 3, query: "x"))
+
+        let result = try await service.search(sid: 10, query: "x", criteriaID: 3)
+
+        #expect(result.items.count == 1)
+        #expect(await main.lastSentString()?.contains("browse/search") == true)
+        await channel.close()
+    }
+
+    @Test func aBrowseDoesNotWaitForASearchInFlight() async throws {
+        let maker = SearchChannelTests.TransportMaker()
+        let (service, main, channel) = try await makeSetupWithChannel(maker)
+        let search = Task { try await service.search(sid: 9, query: "x", criteriaID: 7) }
+        try await Task.sleep(for: .milliseconds(80))
+        await main.enqueueResponse(makeResponse(command: "browse/browse", message: "sid=1028&returned=0&count=0", payload: "[]"))
+
+        let favorites = try await service.browseSource(sid: 1028)
+
+        #expect(favorites.items.isEmpty)
+        search.cancel()
+        await channel.close()
+    }
+
     // MARK: - Search Capability
 
     private func makeSetupWithClock() async throws -> (BrowseService, MockTCPTransport, HEOSConnection, ManualClock) {

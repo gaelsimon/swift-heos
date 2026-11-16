@@ -50,6 +50,13 @@ empty `SearchCaps`. The server is found over SSDP and matched by its friendly na
 iOS this relies on the same multicast entitlement. A server that is slow or cannot be reached
 leaves the results as HEOS sent them.
 
+## Searches
+
+Searches go over a second connection to the speaker, opened on the first search and closed
+after a quiet spell. Several run on it at once, so a search across every service takes about
+as long as its slowest answer, and browsing keeps the main connection to itself. When the
+second connection cannot be opened, searches go over the main one, one at a time.
+
 ## Usage
 
 `HEOSService` pushes state into a `StateUpdater` you implement.
