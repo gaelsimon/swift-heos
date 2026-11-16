@@ -14,11 +14,16 @@ actor MockTCPTransport: TransportProtocol {
     /// When false, responses accumulate and must be delivered manually via `deliverNextResponse()`.
     var autoRespond: Bool
 
-    init(autoRespond: Bool = true) {
+    init(autoRespond: Bool = true, connectError: Error? = nil) {
         self.autoRespond = autoRespond
+        self.connectError = connectError
     }
 
+    /// Thrown by `connect` when set, like a speaker refusing the connection.
+    let connectError: Error?
+
     func connect(host: String, port: Int) async throws {
+        if let connectError { throw connectError }
         connectedHost = host
         connectedPort = port
         isConnected = true

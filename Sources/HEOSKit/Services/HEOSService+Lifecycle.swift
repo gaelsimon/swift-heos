@@ -78,6 +78,8 @@ extension HEOSService {
         upnpTransport = nil
         await connection?.disconnect()
         connection = nil
+        await searchChannel?.close()
+        searchChannel = nil
     }
 
     func connectUPnP(host: String) {

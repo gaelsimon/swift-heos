@@ -17,6 +17,8 @@ public actor HEOSConnection {
 
     private var nextCommandID: UInt64 = 0
     private var pendingCommands: [UInt64: PendingCommand] = [:]
+    /// Errors that fitted pending commands of different keys.
+    private var heldErrors: [(key: String, error: HEOSError)] = []
     /// Responses that fitted more than one pending command; see `recordAmbiguousMatch`.
     private(set) var ambiguousMatchCount = 0
     private var receiveTask: Task<Void, Never>?
@@ -49,6 +51,7 @@ public actor HEOSConnection {
             pending.continuation.resume(throwing: TransportError.disconnected)
         }
         pendingCommands.removeAll()
+        heldErrors.removeAll()
 
         eventContinuation?.finish()
         eventContinuation = nil
@@ -111,6 +114,7 @@ public actor HEOSConnection {
                 WireLog.shared.log("!! timeout #\(id) key=\(commandKey)")
                 HEOSLogger.connection.warning("Command #\(id) timed out: \(commandKey)")
                 timedOut.continuation.resume(throwing: TransportError.timeout)
+                settleHeldErrors()
             }
         }
     }
@@ -128,6 +132,7 @@ public actor HEOSConnection {
                 guard let failed = pendingCommands.removeValue(forKey: id) else { return }
                 failed.timeoutTask.cancel()
                 failed.continuation.resume(throwing: error)
+                settleHeldErrors()
             }
         }
     }
@@ -138,6 +143,7 @@ public actor HEOSConnection {
         WireLog.shared.log("xx abandoned #\(id) key=\(pending.commandKey)")
         pending.timeoutTask.cancel()
         pending.continuation.resume(throwing: CancellationError())
+        settleHeldErrors()
     }
 
     public func sendFireAndForget(_ command: HEOSCommand) async throws {
@@ -209,6 +215,7 @@ public actor HEOSConnection {
                     HEOSLogger.connection.debug("Matched response #\(id): \(response.command)")
                     pending.timeoutTask.cancel()
                     pending.continuation.resume(returning: response)
+                    settleHeldErrors()
                 } else {
                     WireLog.shared.log("!! UNMATCHED key=\(commandKey) pending=[\(pendingCommandKeys)]")
                     HEOSLogger.connection.warning("Unmatched response: \(commandKey) (pending: \(self.pendingCommandKeys))")
@@ -224,23 +231,7 @@ public actor HEOSConnection {
         } catch {
             if let heosError = error as? HEOSError {
                 let commandKey = Self.matchingKey(command: heosError.command, message: heosError.message)
-                if let id = matchPendingID(for: commandKey),
-                   let pending = pendingCommands.removeValue(forKey: id) {
-                    WireLog.shared.log("ok-err #\(id) key=\(commandKey)")
-                    pending.timeoutTask.cancel()
-                    pending.continuation.resume(throwing: heosError)
-                } else {
-                    WireLog.shared.log("!! UNMATCHED-ERROR key=\(commandKey) pending=[\(pendingCommandKeys)]")
-                    HEOSLogger.connection.warning("Unmatched error response: \(commandKey)")
-                    eventContinuation?.yield(HEOSEvent(
-                        command: "event/system_error",
-                        message: [
-                            "command": commandKey,
-                            "error": heosError.text,
-                            "eid": "\(heosError.errorID)"
-                        ]
-                    ))
-                }
+                routeError(heosError, key: commandKey)
             } else {
                 let preview = String(data: data.prefix(200), encoding: .utf8) ?? "<binary>"
                 HEOSLogger.connection.error("Parse error: \(error.localizedDescription); data: \(preview)")
@@ -256,7 +247,69 @@ public actor HEOSConnection {
             pending.continuation.resume(throwing: error)
         }
         pendingCommands.removeAll()
+        heldErrors.removeAll()
         eventContinuation?.finish()
+    }
+
+    /// Held when it fits commands of different keys: a search the service gave up on echoes no sid or scid.
+    private func routeError(_ error: HEOSError, key: String) {
+        if let id = oldestPendingID(for: key) {
+            failPending(id, with: error, key: key)
+            return
+        }
+        let candidates = compatiblePendingCommands(for: key)
+        if Set(candidates.map(\.commandKey)).count > 1 {
+            heldErrors.append((key, error))
+            WireLog.shared.log("?? HELD-ERROR key=\(key) pending=[\(pendingCommandKeys)]")
+            settleHeldErrors()
+            return
+        }
+        if let oldest = candidates.min(by: { $0.id < $1.id }) {
+            failPending(oldest.id, with: error, key: key)
+        } else {
+            reportUnmatchedError(error, key: key)
+        }
+    }
+
+    /// Hands a held error over once one command alone fits it, or once every fitting command has an error.
+    private func settleHeldErrors() {
+        var index = 0
+        while index < heldErrors.count {
+            let held = heldErrors[index]
+            let candidates = compatiblePendingCommands(for: held.key)
+            let alike = heldErrors.filter { $0.key == held.key }.count
+            guard Set(candidates.map(\.commandKey)).count <= 1 || alike >= candidates.count else {
+                index += 1
+                continue
+            }
+            heldErrors.remove(at: index)
+            if let oldest = candidates.min(by: { $0.id < $1.id }) {
+                failPending(oldest.id, with: held.error, key: held.key)
+            } else {
+                reportUnmatchedError(held.error, key: held.key)
+            }
+            index = 0
+        }
+    }
+
+    private func failPending(_ id: UInt64, with error: HEOSError, key: String) {
+        guard let pending = pendingCommands.removeValue(forKey: id) else { return }
+        WireLog.shared.log("ok-err #\(id) key=\(key)")
+        pending.timeoutTask.cancel()
+        pending.continuation.resume(throwing: error)
+    }
+
+    private func reportUnmatchedError(_ error: HEOSError, key: String) {
+        WireLog.shared.log("!! UNMATCHED-ERROR key=\(key) pending=[\(pendingCommandKeys)]")
+        HEOSLogger.connection.warning("Unmatched error response: \(key)")
+        eventContinuation?.yield(HEOSEvent(
+            command: "event/system_error",
+            message: [
+                "command": key,
+                "error": error.text,
+                "eid": "\(error.errorID)"
+            ]
+        ))
     }
 
     /// Find the oldest pending command ID matching a command key (FIFO).
@@ -329,6 +382,7 @@ public actor HEOSConnection {
                 WireLog.shared.log("!! timeout #\(id) key=\(commandKey)")
                 HEOSLogger.connection.warning("Command #\(id) timed out: \(commandKey)")
                 timedOut.continuation.resume(throwing: TransportError.timeout)
+                settleHeldErrors()
             }
         }
         pendingCommands[id] = PendingCommand(

@@ -541,6 +541,91 @@ struct HEOSConnectionTests {
         }
     }
 
+    // MARK: - Errors Without Parameters
+
+    private func search(_ connection: HEOSConnection, scid: Int, timeout: Duration = .seconds(5)) async throws -> HEOSResponse {
+        try await connection.send(.search(sid: 9, searchString: "x", searchCriteriaID: scid, range: 0...4), timeout: timeout)
+    }
+
+    private func searchAnswer(scid: Int) -> String {
+        makeResponse(command: "browse/search", message: "sid=9&search=x&scid=\(scid)&range=0,4&returned=0&count=0")
+    }
+
+    private func bareSearchError() -> String {
+        makeErrorResponse(command: "browse/search", eid: 12, text: "System error")
+    }
+
+    @Test func aBareErrorWaitsForTheOtherSearchToBeAnswered() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let tracks = search(connection, scid: 3)
+        try await Task.sleep(for: .milliseconds(30))
+        async let accounts = search(connection, scid: 7)
+        try await Task.sleep(for: .milliseconds(30))
+
+        await transport.simulateEvent(bareSearchError())
+        try await Task.sleep(for: .milliseconds(30))
+        await transport.simulateEvent(searchAnswer(scid: 3))
+
+        let answered = try await tracks
+        #expect(answered.message["scid"] == "3")
+        do {
+            _ = try await accounts
+            Issue.record("The search the error belongs to should have failed")
+        } catch {
+            #expect(error is HEOSError)
+        }
+        await connection.disconnect()
+    }
+
+    @Test func aBareErrorWithOneSearchPendingIsDeliveredAtOnce() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        let accounts = Task { try await search(connection, scid: 7) }
+        try await Task.sleep(for: .milliseconds(30))
+        await transport.simulateEvent(bareSearchError())
+
+        await #expect(throws: HEOSError.self) { try await accounts.value }
+        await connection.disconnect()
+    }
+
+    @Test func asManyBareErrorsAsSearchesFailThemAll() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        async let tracks = search(connection, scid: 3)
+        async let accounts = search(connection, scid: 7)
+        try await Task.sleep(for: .milliseconds(30))
+        await transport.simulateEvent(bareSearchError())
+        await transport.simulateEvent(bareSearchError())
+
+        var failures = 0
+        do { _ = try await tracks } catch is HEOSError { failures += 1 }
+        do { _ = try await accounts } catch is HEOSError { failures += 1 }
+        #expect(failures == 2)
+        await connection.disconnect()
+    }
+
+    @Test func aHeldErrorGoesToTheSearchLeftWhenTheOtherTimesOut() async throws {
+        let transport = MockTCPTransport(autoRespond: false)
+        let connection = HEOSConnection(transport: transport)
+        try await connectAndWait(connection, transport: transport)
+
+        let accounts = Task { try await search(connection, scid: 7) }
+        let tracks = Task { try await search(connection, scid: 3, timeout: .milliseconds(150)) }
+        try await Task.sleep(for: .milliseconds(30))
+        await transport.simulateEvent(bareSearchError())
+
+        await #expect(throws: TransportError.self) { try await tracks.value }
+        await #expect(throws: HEOSError.self) { try await accounts.value }
+        await connection.disconnect()
+    }
+
     private func waitUntilReceiving(_ transport: EagerRespondingTransport) async {
         let deadline = ContinuousClock.now + .seconds(5)
         while ContinuousClock.now < deadline {
