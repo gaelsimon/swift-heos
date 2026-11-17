@@ -17,6 +17,9 @@ public struct TrackMetadata: Sendable, Equatable {
     // Possibly higher-res album art
     public let albumArtURI: String?
 
+    /// Where the speaker reads the audio from; the only thing that tells one raw URL stream from another.
+    public let streamURL: String?
+
     public init(
         sampleRate: Int? = nil,
         bitDepth: Int? = nil,
@@ -25,7 +28,8 @@ public struct TrackMetadata: Sendable, Equatable {
         codec: String? = nil,
         genre: String? = nil,
         trackNumber: Int? = nil,
-        albumArtURI: String? = nil
+        albumArtURI: String? = nil,
+        streamURL: String? = nil
     ) {
         self.sampleRate = sampleRate
         self.bitDepth = bitDepth
@@ -35,6 +39,7 @@ public struct TrackMetadata: Sendable, Equatable {
         self.genre = genre
         self.trackNumber = trackNumber
         self.albumArtURI = albumArtURI
+        self.streamURL = streamURL
     }
 
     /// Codecs whose bitrate describes the file, not what a listener hears.
