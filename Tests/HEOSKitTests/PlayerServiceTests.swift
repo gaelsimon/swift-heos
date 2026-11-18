@@ -264,6 +264,72 @@ struct PlayerServiceTests {
         await connection.disconnect()
     }
 
+    private func queuePayload(_ qids: ClosedRange<Int>) -> String {
+        let items = qids.map { #"{"song":"Song \#($0)","album":"","artist":"","image_url":"","mid":"m\#($0)","qid":\#($0),"album_id":""}"# }
+        return "[" + items.joined(separator: ",") + "]"
+    }
+
+    private func queueCommands(_ transport: MockTCPTransport) async -> [String] {
+        await transport.sentData.map { String(decoding: $0, as: UTF8.self) }.filter { $0.contains("player/get_queue") }
+    }
+
+    @Test func getQueueReadsPastTheHundredRecordsOneAnswerHolds() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&returned=100&count=140", payload: queuePayload(1...100)
+        ))
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&range=100,199&returned=40&count=140", payload: queuePayload(101...140)
+        ))
+
+        let items = try await service.getQueue(pid: 42)
+
+        #expect(items.map(\.qid) == Array(1...140))
+        await connection.disconnect()
+    }
+
+    @Test func getQueueAsksForNoPageBeyondTheCount() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&returned=100&count=100", payload: queuePayload(1...100)
+        ))
+
+        let items = try await service.getQueue(pid: 42)
+
+        #expect(items.count == 100)
+        #expect(await queueCommands(transport).count == 1)
+        await connection.disconnect()
+    }
+
+    @Test func getQueueWithARangeReadsThatPageOnly() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&range=0,9&returned=10&count=140", payload: queuePayload(1...10)
+        ))
+
+        let items = try await service.getQueue(pid: 42, range: 0...9)
+
+        #expect(items.count == 10)
+        #expect(await queueCommands(transport).count == 1)
+        await connection.disconnect()
+    }
+
+    @Test func getQueueStopsWhenAPageComesBackEmpty() async throws {
+        let (service, transport, connection) = try await makeSetup()
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&returned=100&count=140", payload: queuePayload(1...100)
+        ))
+        await transport.enqueueResponse(makeResponse(
+            command: "player/get_queue", message: "pid=42&range=100,199&returned=0&count=140", payload: "[]"
+        ))
+
+        let items = try await service.getQueue(pid: 42)
+
+        #expect(items.count == 100)
+        #expect(await queueCommands(transport).count == 2)
+        await connection.disconnect()
+    }
+
     // MARK: - Command Forwarding
 
     @Test func playNextSendsCommand() async throws {
