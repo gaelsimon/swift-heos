@@ -70,11 +70,26 @@ public actor PlayerService {
         try await connection.send(.setPlayMode(pid: pid, repeat: repeatMode, shuffle: shuffle))
     }
 
+    /// Without a range, the whole queue.
     public func getQueue(pid: Int, range: ClosedRange<Int>? = nil) async throws -> [QueueItem] {
-        // Queue responses can be large and the device deprioritizes them under
-        // heavy browse traffic, so use a longer timeout than the default 10s.
-        let response = try await connection.send(.getQueue(pid: pid, range: range), timeout: .seconds(20))
-        return parser.parseQueueItems(response)
+        var response = try await queuePage(pid: pid, range: range)
+        var items = parser.parseQueueItems(response)
+        guard range == nil else { return items }
+        // One answer holds a hundred records at most, and a page asked for right at the end is refused.
+        while let total = Int(response.message["count"] ?? ""), items.count < total {
+            response = try await queuePage(pid: pid, range: items.count...(items.count + Self.queuePageSize - 1))
+            let page = parser.parseQueueItems(response)
+            if page.isEmpty { break }
+            items += page
+        }
+        return items
+    }
+
+    private static let queuePageSize = 100
+
+    private func queuePage(pid: Int, range: ClosedRange<Int>?) async throws -> HEOSResponse {
+        // The speaker answers a queue slowly under heavy browse traffic.
+        try await connection.send(.getQueue(pid: pid, range: range), timeout: .seconds(20))
     }
 
     public func playQueueItem(pid: Int, qid: Int) async throws {

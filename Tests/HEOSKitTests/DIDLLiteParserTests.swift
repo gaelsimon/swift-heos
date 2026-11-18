@@ -42,6 +42,28 @@ struct DIDLLiteParserTests {
         #expect(metadata?.albumArtURI == "http://example.com/art.jpg")
     }
 
+    // MARK: - Raw URL stream (Marantz MODEL 40n, GetPositionInfo)
+
+    static let urlStreamDIDL = """
+    <DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" \
+    xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"><item id="1" parentID="1" restricted="1">\
+    <dc:title>Url Stream</dc:title><res protocolInfo="http-get:*:*:*" size="0" bitrate="192859" sampleFrequency="48000" \
+    duration="00:00:00">https://stream.example.com/radio-hifi.aac</res>\
+    <desc id="audioFormat" nameSpace="urn:schemas-denon-com:metadata/">AAC</desc></item></DIDL-Lite>
+    """
+
+    @Test func keepsTheAddressOfAStreamTheSpeakerOnlyCallsUrlStream() {
+        let metadata = DIDLLiteParser.parse(Self.urlStreamDIDL)
+
+        #expect(metadata?.streamURL == "https://stream.example.com/radio-hifi.aac")
+    }
+
+    @Test func aTrackWithNoResourceHasNoStreamAddress() {
+        let metadata = DIDLLiteParser.parse("<DIDL-Lite><item><upnp:genre>Jazz</upnp:genre></item></DIDL-Lite>")
+
+        #expect(metadata?.streamURL == nil)
+    }
+
     // MARK: - Real Marantz/Tidal response (from GetCurrentState)
 
     @Test func parsesRealTidalResponse() {
@@ -202,7 +224,7 @@ struct DIDLLiteParserTests {
           </item>
         </DIDL-Lite>
         """
-        #expect(DIDLLiteParser.parse(xml) == nil)
+        #expect(DIDLLiteParser.parse(xml) == TrackMetadata(streamURL: "http://low"))
     }
 
     @Test func firstResWinsOverALaterRendition() {

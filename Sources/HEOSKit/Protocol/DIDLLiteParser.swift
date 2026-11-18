@@ -35,7 +35,8 @@ public enum DIDLLiteParser {
             codec: codec,
             genre: genre,
             trackNumber: trackNumber,
-            albumArtURI: albumArtURI
+            albumArtURI: albumArtURI,
+            streamURL: usableText(item.values["res"])
         )
 
         // Return nil if every field is nil (nothing useful was parsed)
@@ -102,7 +103,7 @@ public enum DIDLLiteParser {
 /// Reads the first `<item>` with `XMLParser`, matching local names as the `local-name()` XPath
 /// predicates it replaces did -- `XMLDocument` and XPath are macOS-only.
 private final class ItemCollector: NSObject, XMLParserDelegate {
-    /// Text of the first `genre`, `originalTrackNumber` and `albumArtURI` child, untrimmed.
+    /// Text of the first `genre`, `originalTrackNumber`, `albumArtURI` and `res` child, untrimmed.
     private(set) var values: [String: String] = [:]
     /// Attributes of the first `res` child.
     private(set) var resAttributes: [String: String] = [:]
@@ -167,6 +168,7 @@ private final class ItemCollector: NSObject, XMLParserDelegate {
             guard !sawRes else { return }
             sawRes = true
             resAttributes = attributes
+            beginCapturing(name)
         case "desc":
             // First audioFormat descriptor wins, empty text included: it means "no codec".
             guard !sawAudioFormat, attributes["id"] == "audioFormat" else { return }
