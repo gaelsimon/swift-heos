@@ -186,6 +186,73 @@ struct HEOSServiceLifecycleTests {
         #expect(state.calls.contains { $0.hasPrefix("setGroups") } == false)
     }
 
+    // MARK: - A failed account or players fetch
+
+    /// iOS tears the session down when the app leaves the screen, failing the commands of a load in progress: a
+    /// failed check_account used to sign the user out, and the app then signed in again and rebuilt its Home.
+    @Test @MainActor func aFailedAccountFetchOnReconnectLeavesTheUserSignedIn() async {
+        let state = MockStateUpdater()
+        state.signedInUser = "user@example.com"
+        let service = HEOSService(stateUpdater: state)
+
+        await service.loadAllStateParallel(cachedPID: 1)
+
+        #expect(state.signedInUser == "user@example.com")
+        #expect(state.calls.contains { $0.hasPrefix("setSignedInUser") } == false)
+    }
+
+    @Test @MainActor func aFailedAccountFetchOnFirstConnectLeavesTheUserSignedIn() async {
+        let state = MockStateUpdater()
+        state.signedInUser = "user@example.com"
+        let service = HEOSService(stateUpdater: state)
+
+        await service.loadStateTwoPhase()
+
+        #expect(state.signedInUser == "user@example.com")
+    }
+
+    @Test @MainActor func aFailedPlayersFetchLeavesThePlayersOnScreenAlone() async {
+        let state = MockStateUpdater()
+        state.players = [Player(pid: 1, name: "Living Room")]
+        let service = HEOSService(stateUpdater: state)
+
+        await service.loadAllStateParallel(cachedPID: 1)
+        await service.loadStateTwoPhase()
+
+        #expect(state.players.map(\.pid) == [1])
+        #expect(state.calls.contains { $0.hasPrefix("setPlayers") } == false)
+    }
+
+    /// The speaker's own "signed_out" is an answer, and still signs the user out.
+    @Test @MainActor func aSignedOutAnswerOnReconnectSignsOut() async throws {
+        let state = MockStateUpdater()
+        state.signedInUser = "user@example.com"
+        let transport = SpeakerTransport()
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        await waitUntil { await transport.isReceiving }
+        let service = HEOSService(stateUpdater: state)
+        await service.useServices(connection)
+
+        await service.loadAllStateParallel(cachedPID: 1)
+
+        #expect(state.signedInUser == nil)
+        #expect(state.calls.contains("setSignedInUser:nil"))
+        #expect(state.players.map(\.pid) == [1])
+        await connection.disconnect()
+    }
+
+    // MARK: - Seeking without UPnP
+
+    /// A seek that went nowhere used to report success, so the app waited for a position that never came.
+    @Test @MainActor func aSeekWithoutTheUPnPConnectionFails() async {
+        let service = HEOSService(stateUpdater: MockStateUpdater())
+
+        await #expect(throws: HEOSServiceError.self) {
+            try await service.seek(target: 30)
+        }
+    }
+
     // MARK: - A failed sources fetch
 
     /// A getMusicSources that fails on connect used to publish an empty list: the sidebar lost its
