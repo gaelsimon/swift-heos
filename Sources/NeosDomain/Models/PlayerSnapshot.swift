@@ -7,7 +7,8 @@ public struct PlayerSnapshot: Sendable {
     public let muted: Bool
     public let repeatMode: RepeatMode
     public let shuffleMode: ShuffleMode
-    public let queue: [QueueItem]
+    /// Nil when the queue was not read with the rest, so the one on screen stays.
+    public let queue: [QueueItem]?
     public let nowPlayingOptions: [ServiceOption]
 
     public init(
@@ -17,7 +18,7 @@ public struct PlayerSnapshot: Sendable {
         muted: Bool,
         repeatMode: RepeatMode,
         shuffleMode: ShuffleMode,
-        queue: [QueueItem],
+        queue: [QueueItem]?,
         nowPlayingOptions: [ServiceOption] = []
     ) {
         self.playState = playState

@@ -337,7 +337,7 @@ extension HEOSService {
                 muted: muted,
                 repeatMode: playMode?.repeat ?? .off,
                 shuffleMode: playMode?.shuffle ?? .off,
-                queue: [],
+                queue: nil,
                 nowPlayingOptions: nowPlayingOptions
             )
             await apply(snapshot: snapshot)
@@ -345,8 +345,9 @@ extension HEOSService {
 
         // Phase 4: Queue; fetched after player state is applied so it doesn't
         // compete with the browse storm triggered by setMusicSources above.
-        let queue = (try? await playerService?.getQueue(pid: resolvedPID)) ?? []
-        await stateUpdater.setQueue(queue)
+        if let queue = try? await playerService?.getQueue(pid: resolvedPID) {
+            await stateUpdater.setQueue(queue)
+        }
     }
 
     func loadStateTwoPhase() async {

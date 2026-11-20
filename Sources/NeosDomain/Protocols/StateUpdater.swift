@@ -71,7 +71,7 @@ public extension StateUpdater {
         setMuted(snapshot.muted)
         setRepeatMode(snapshot.repeatMode)
         setShuffleMode(snapshot.shuffleMode)
-        setQueue(snapshot.queue)
+        if let queue = snapshot.queue { setQueue(queue) }
     }
 }
 
