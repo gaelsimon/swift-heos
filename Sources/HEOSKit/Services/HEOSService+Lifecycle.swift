@@ -277,7 +277,7 @@ extension HEOSService {
         async let playersResult = { [playerService] in try? await playerService?.getPlayers() }()
         async let groupsResult = { [groupService] in try? await groupService?.getGroups() }()
         async let sourcesResult = { [browseService] in try? await browseService?.getMusicSources() }()
-        async let accountResult = { [systemService] in try? await systemService?.checkAccount() }()
+        async let accountResult = Self.account(from: systemService)
         async let playStateResult = { [playerService] in try? await playerService?.getPlayState(pid: cachedPID) }()
         async let mediaAndOptionsResult = { [playerService] in try? await playerService?.getNowPlayingMedia(pid: cachedPID) }()
         async let volumeResult = { [playerService] in try? await playerService?.getVolume(pid: cachedPID) }()
@@ -286,23 +286,27 @@ extension HEOSService {
 
         // Phase 1: UI-critical state; apply as soon as available so the sidebar
         // renders sources without waiting for slower queries (account, queue).
-        let players = await playersResult ?? []
-        // Left optional: a failed fetch must not read as "no groups", which would drop every group
-        // from the sidebar and un-collapse a stereo pair until the next groups_changed.
+        // Left optional: a failed fetch must not read as "no players" or "no groups", which would empty the
+        // sidebar and un-collapse a stereo pair until the next players_changed or groups_changed.
+        let fetchedPlayers = await playersResult
         let fetchedGroups = await groupsResult
         let sources = await sourcesResult
+        let players = fetchedPlayers ?? []
 
-        await stateUpdater.setPlayers(players)
+        if let fetchedPlayers { await stateUpdater.setPlayers(fetchedPlayers) }
         if let fetchedGroups { await stateUpdater.setGroups(fetchedGroups) }
         if let sources { await stateUpdater.setMusicSources(sources) }
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
-        Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
+        if let fetchedPlayers {
+            Task { await self.refreshGroupTopology(groups: fetchedGroups, players: fetchedPlayers) }
+        }
         Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: fetchedGroups ?? [], to: stateUpdater) }
 
         // Phase 2: remaining global state (account check may hit cloud servers)
-        let signedInUser = await accountResult
-        await stateUpdater.setSignedInUser(signedInUser)
+        if case .success(let signedInUser) = await accountResult {
+            await stateUpdater.setSignedInUser(signedInUser)
+        }
         if sources == nil { await retryMusicSources() }
 
         let host = await connectionCoordinator.lastHost
@@ -354,25 +358,29 @@ extension HEOSService {
         async let playersResult = { [playerService] in try? await playerService?.getPlayers() }()
         async let groupsResult = { [groupService] in try? await groupService?.getGroups() }()
         async let sourcesResult = { [browseService] in try? await browseService?.getMusicSources() }()
-        async let accountResult = { [systemService] in try? await systemService?.checkAccount() }()
+        async let accountResult = Self.account(from: systemService)
 
         // Apply UI-critical state first without waiting for account check
-        let players = await playersResult ?? []
-        // Left optional: a failed fetch must not read as "no groups", which would drop every group
-        // from the sidebar and un-collapse a stereo pair until the next groups_changed.
+        // Left optional: a failed fetch must not read as "no players" or "no groups", which would empty the
+        // sidebar and un-collapse a stereo pair until the next players_changed or groups_changed.
+        let fetchedPlayers = await playersResult
         let fetchedGroups = await groupsResult
         let sources = await sourcesResult
+        let players = fetchedPlayers ?? []
 
-        await stateUpdater.setPlayers(players)
+        if let fetchedPlayers { await stateUpdater.setPlayers(fetchedPlayers) }
         if let fetchedGroups { await stateUpdater.setGroups(fetchedGroups) }
         if let sources { await stateUpdater.setMusicSources(sources) }
 
         // Non-blocking: classify pairs vs multi-room groups over UPnP and expand the latter.
-        Task { await self.refreshGroupTopology(groups: fetchedGroups, players: players) }
+        if let fetchedPlayers {
+            Task { await self.refreshGroupTopology(groups: fetchedGroups, players: fetchedPlayers) }
+        }
         Task { [groupService, stateUpdater] in await groupService?.pushLevels(of: fetchedGroups ?? [], to: stateUpdater) }
 
-        let signedInUser = await accountResult
-        await stateUpdater.setSignedInUser(signedInUser)
+        if case .success(let signedInUser) = await accountResult {
+            await stateUpdater.setSignedInUser(signedInUser)
+        }
         if sources == nil { await retryMusicSources() }
 
         let host = await connectionCoordinator.lastHost
@@ -380,6 +388,16 @@ extension HEOSService {
             await connectionCoordinator.updateLastPlayerID(player.pid)
             await stateUpdater.setSelectedPlayerID(player.pid)
             await loadPlayerState(pid: player.pid)
+        }
+    }
+
+    /// `.success(nil)` is the speaker saying nobody is signed in; a failed request says nothing about the account.
+    static func account(from systemService: SystemService?) async -> Result<String?, any Error> {
+        guard let systemService else { return .failure(HEOSServiceError.notConnected) }
+        do {
+            return .success(try await systemService.checkAccount())
+        } catch {
+            return .failure(error)
         }
     }
 
