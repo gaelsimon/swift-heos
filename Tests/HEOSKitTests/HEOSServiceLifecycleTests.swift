@@ -254,10 +254,107 @@ struct HEOSServiceLifecycleTests {
 
         #expect(state.nonFatalReports.map(\.source) == ["connect.sources"])
     }
+
+    // MARK: - The queue on reconnect
+
+    /// Reconnecting on iOS happens at every return to the foreground: the queue on screen used to
+    /// be emptied by the player state and filled again a moment later.
+    @Test @MainActor func reconnectingDoesNotEmptyTheQueueBeforeReadingIt() async throws {
+        let state = MockStateUpdater()
+        let transport = SpeakerTransport()
+        let connection = HEOSConnection(transport: transport)
+        try await connection.connect(host: "test", port: 1255)
+        await waitUntil { await transport.isReceiving }
+        let service = HEOSService(stateUpdater: state)
+        await service.useServices(connection)
+
+        await service.loadAllStateParallel(cachedPID: 1)
+
+        #expect(state.snapshot != nil)
+        #expect(state.snapshot?.queue == nil)
+        #expect(state.queue.map(\.qid) == [1])
+        await connection.disconnect()
+    }
+
+    @MainActor
+    private func waitUntil(timeout: Duration = .seconds(5), _ condition: () async -> Bool) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline, !(await condition()) {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+    }
+}
+
+/// Answers each command the way one speaker with a one-track queue would.
+private actor SpeakerTransport: TransportProtocol {
+    private var continuation: AsyncThrowingStream<Data, Error>.Continuation?
+    private(set) var isConnected = false
+    var isReceiving: Bool { continuation != nil }
+
+    func connect(host: String, port: Int) async throws { isConnected = true }
+    func disconnect() async {
+        isConnected = false
+        continuation?.finish()
+    }
+
+    nonisolated func receive() -> AsyncThrowingStream<Data, Error> {
+        AsyncThrowingStream { continuation in
+            Task { await self.setContinuation(continuation) }
+        }
+    }
+
+    private func setContinuation(_ continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+        self.continuation = continuation
+    }
+
+    func send(_ data: Data) async throws {
+        let line = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = line.replacingOccurrences(of: "heos://", with: "")
+        let parts = request.split(separator: "?", maxSplits: 1).map(String.init)
+        let command = parts[0]
+        let query = parts.count > 1 ? parts[1] : ""
+        let (message, payload) = Self.answer(command, query)
+        let json = payload.map {
+            #"{"heos":{"command":"\#(command)","result":"success","message":"\#(message)"},"payload":\#($0)}"#
+        } ?? #"{"heos":{"command":"\#(command)","result":"success","message":"\#(message)"}}"#
+        continuation?.yield(Data((json + "\r\n").utf8))
+    }
+
+    private static func answer(_ command: String, _ query: String) -> (String, String?) {
+        switch command {
+        case "player/get_players":
+            return (query, #"[{"name":"Living Room","pid":1,"model":"HEOS 1","version":"1.0","ip":"192.0.2.10","network":"wired","lineout":0}]"#)
+        case "group/get_groups", "browse/get_music_sources":
+            return (query, "[]")
+        case "system/check_account":
+            return ("signed_out", nil)
+        case "player/get_play_state":
+            return (query + "&state=play", nil)
+        case "player/get_now_playing_media":
+            return (query, #"{"type":"song","song":"Song 1","album":"","artist":"","image_url":"","mid":"m1","qid":1,"sid":1,"album_id":""}"#)
+        case "player/get_volume":
+            return (query + "&level=3", nil)
+        case "player/get_mute":
+            return (query + "&state=off", nil)
+        case "player/get_play_mode":
+            return (query + "&repeat=off&shuffle=off", nil)
+        case "player/get_queue":
+            return (query + "&returned=1&count=1", #"[{"song":"Song 1","album":"","artist":"","image_url":"","mid":"m1","qid":1,"album_id":""}]"#)
+        default:
+            return (query, nil)
+        }
+    }
 }
 
 private extension HEOSService {
     func useBrowseService(_ service: HEOSKit.BrowseService) {
         browseService = service
+    }
+
+    func useServices(_ connection: HEOSConnection) {
+        playerService = PlayerService(connection: connection)
+        groupService = GroupService(connection: connection)
+        browseService = HEOSKit.BrowseService(connection: connection)
+        systemService = SystemService(connection: connection)
     }
 }
