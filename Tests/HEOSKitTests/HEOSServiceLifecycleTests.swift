@@ -242,6 +242,17 @@ struct HEOSServiceLifecycleTests {
         await connection.disconnect()
     }
 
+    // MARK: - Seeking without UPnP
+
+    /// A seek that went nowhere used to report success, so the app waited for a position that never came.
+    @Test @MainActor func aSeekWithoutTheUPnPConnectionFails() async {
+        let service = HEOSService(stateUpdater: MockStateUpdater())
+
+        await #expect(throws: HEOSServiceError.self) {
+            try await service.seek(target: 30)
+        }
+    }
+
     // MARK: - A failed sources fetch
 
     /// A getMusicSources that fails on connect used to publish an empty list: the sidebar lost its

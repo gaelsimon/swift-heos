@@ -139,11 +139,12 @@ public actor HEOSService {
 
         await conn.startHeartbeat()
 
+        // Best-effort UPnP AVTransport connection for seek/position (port 60006, same host). Before the AVR
+        // connection, which can wait its whole timeout on a speaker without port 23.
+        connectUPnP(host: host)
+
         // Best-effort AVR connection for power control (port 23, same host)
         await connectAVR(host: host)
-
-        // Best-effort UPnP AVTransport connection for seek/position (port 60006, same host)
-        connectUPnP(host: host)
 
         HEOSLogger.service.info("Connected and initialized")
     }
@@ -511,7 +512,7 @@ public actor HEOSService {
     public func seek(target: TimeInterval) async throws {
         guard let upnpTransport else {
             HEOSLogger.upnp.warning("UPnP transport not available")
-            return
+            throw HEOSServiceError.notConnected
         }
         try await upnpTransport.seek(target: target)
     }
